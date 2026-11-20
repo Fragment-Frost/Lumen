@@ -1,16 +1,13 @@
 [
   {
     "modid": "${modid}",
-    "name": "Xample Mod",
-    "description": "A mod that is used as an example.",
+    "name": "Lumen",
+    "description": "Performance optimization suite for Minecraft 1.8.9: coalesced light updates, configurable chunk-build workers, async pathfinding, frustum & occlusion culling, HUD text texture caching and allocation-free hot paths.",
     "version": "${version}",
     "mcversion": "${mcversion}",
-    "url": "https://github.com/romangraef/Forge1.8.9Template/",
-    "updateUrl": "",
     "authorList": [
-      "You"
+      "fpvp"
     ],
-    "credits": "",
     "logoFile": "",
     "screenshots": [],
     "dependencies": []

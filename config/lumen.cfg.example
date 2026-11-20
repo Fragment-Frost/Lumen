@@ -1,0 +1,12 @@
+# Lumen —— 配置文件示例
+# 实际生成位置：.minecraft/config/lumen.cfg
+# 下面就是 Forge 1.8.9 读取的键名，可直接照抄修改。
+
+lighting {
+    # 合并同一 tick 内重复的光照校验，减少光照洪泛次数。
+    # 这是 Starlight 风格优化的核心开关。设为 false 即完全回到原版行为。
+    B:enableLightBatching=true
+
+    # 在日志中输出光照优化统计信息。
+    B:debugLogging=false
+}
