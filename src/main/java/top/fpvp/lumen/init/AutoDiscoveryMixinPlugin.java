@@ -171,6 +171,7 @@ public class AutoDiscoveryMixinPlugin implements IMixinConfigPlugin {
             "MixinGuiMainMenu",
             "MixinLayerCape",
             "MixinLayerCustomHead",
+            "MixinLayerRenderer",
             "MixinChunkRenderDispatcher"
     };
 

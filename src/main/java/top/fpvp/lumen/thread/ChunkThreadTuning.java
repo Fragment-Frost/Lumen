@@ -39,6 +39,86 @@ public final class ChunkThreadTuning {
     /** 原版构建器池容量。 */
     public static final int VANILLA_BUILDERS = 5;
 
+    /**
+     * 区块构建模式。
+     *
+     * <p>这三个模式回答的是同一个问题的三种答案：<b>主线程要不要等区块构建</b>。
+     *
+     * <ul>
+     *   <li>{@link #THREADED}（线程化）：完全不等。主线程继续渲染，
+     *       区块构建在 worker 上完成。极端情况下会看到"白色空缺区块"
+     *       短暂存在，但帧率最平滑。</li>
+     *   <li>{@link #SEMI_BLOCKING}（半堵塞）：主线程在每帧的构建阶段
+     *       只等一个<b>很短的时间预算</b>，超时就走。折中方案。</li>
+     *   <li>{@link #FULL_BLOCKING}（全堵塞）：主线程等到所有排队构建完成
+     *       才继续。绝不会看到白色空缺，但跑图时帧率会有明显顿挫。
+     *       适合录屏/截图而不是日常游玩。</li>
+     * </ul>
+     *
+     * <p>注意这三个模式<b>不改变构建的并行度</b> —— 那由线程数控制。
+     * 它们改变的是"主线程愿意为等待构建结果付出多少时间"。
+     */
+    public enum Mode {
+        /** 完全异步，主线程从不等待。 */
+        THREADED,
+        /** 主线程每帧只等一小段时间。 */
+        SEMI_BLOCKING,
+        /** 主线程等到全部构建完成。 */
+        FULL_BLOCKING
+    }
+
+    /**
+     * 把配置值解析成模式。
+     *
+     * <p>配置用字符串而不是枚举：Forge 的 {@code getString} 允许填任意值，
+     * 填错时应当<b>退回默认</b>而不是崩溃。这里对大小写和常见别名都做了兼容。
+     */
+    public static Mode mode() {
+        if (!LumenConfig.enabled) {
+            return Mode.THREADED;
+        }
+        String raw = LumenConfig.chunkBuildMode;
+        if (raw == null) {
+            return Mode.SEMI_BLOCKING;
+        }
+        String v = raw.trim().toLowerCase(java.util.Locale.ROOT);
+        if (v.equals("threaded") || v.equals("async") || v.equals("线程化")) {
+            return Mode.THREADED;
+        }
+        if (v.equals("full") || v.equals("full_blocking") || v.equals("blocking")
+                || v.equals("全堵塞")) {
+            return Mode.FULL_BLOCKING;
+        }
+        if (v.equals("semi") || v.equals("semi_blocking") || v.equals("半堵塞")) {
+            return Mode.SEMI_BLOCKING;
+        }
+        return Mode.SEMI_BLOCKING;
+    }
+
+    /**
+     * 主线程每帧愿意等待区块构建的时间预算（毫秒）。
+     *
+     * <p>三档的取值理由：
+     * <ul>
+     *   <li>线程化：0（不等）；</li>
+     *   <li>半堵塞：用一个很小的值（默认 2ms）。60fps 的帧预算是 16.6ms，
+     *       2ms 是它的 12% —— 低到不会造成可感知的顿挫，
+     *       又足以让"几乎已完成"的构建在本帧就绪；</li>
+     *   <li>全堵塞：用一个足够大的值（默认 50ms）。它本来就不追求帧率，
+     *       而是要保证没有白色空缺。</li>
+     * </ul>
+     */
+    public static long waitBudgetMs() {
+        Mode mode = mode();
+        if (mode == Mode.THREADED) {
+            return 0L;
+        }
+        if (mode == Mode.FULL_BLOCKING) {
+            return Math.max(1L, LumenConfig.chunkBuildWaitMsFull);
+        }
+        return Math.max(0L, LumenConfig.chunkBuildWaitMsSemi);
+    }
+
     /** 每个构建器预估占用的内存单位（10MB）。 */
     private static final long BUILDER_COST_BYTES = 10L * 1024L * 1024L;
 
@@ -87,7 +167,15 @@ public final class ChunkThreadTuning {
 
         int byCpu = cores - 2;
         int byMemory = memoryBudget() / BUDGET_PER_WORKER;
-        return Math.max(1, Math.min(byCpu, byMemory));
+        int auto = Math.max(1, Math.min(byCpu, byMemory));
+
+        // 全堵塞模式下主线程要等 worker 完成，worker 太少会让等待时间
+        // 直接翻倍。此时不占用"留两个核"的那部分余量 ——
+        // 因为等待期间主线程本来就是空闲的，不存在"被 worker 挤占"的问题。
+        if (mode() == Mode.FULL_BLOCKING) {
+            auto = Math.max(auto, Math.min(cores - 1, byMemory));
+        }
+        return auto;
     }
 
     /**

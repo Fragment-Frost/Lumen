@@ -8,6 +8,7 @@ import net.minecraft.tileentity.TileEntity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import top.fpvp.lumen.LumenConfig;
 import top.fpvp.lumen.render.AsyncOcclusionCuller;
 import top.fpvp.lumen.render.BlockEntityOptimizer;
 import top.fpvp.lumen.render.MoreCulling;
@@ -52,11 +53,12 @@ public abstract class MixinRenderGlobal {
     )
     private void lumen$occludeTileEntity(TileEntityRendererDispatcher dispatcher, TileEntity tile,
                                          float partialTicks, int pass) {
-        // MoreCulling 的专用规则（信标光柱、被完全包围的地图/告示牌）。
-        if (MoreCulling.shouldCullTileEntity(tile)) {
+        // MoreCulling 的专用规则（信标光柱、六面全包围、激进遮挡）。
+        if (MoreCulling.shouldCullTileEntity(tile,
+                OcclusionCuller.getEyeX(), OcclusionCuller.getEyeY(), OcclusionCuller.getEyeZ())) {
             return;
         }
-        // 通用遮挡判定。
+        // 通用遮挡判定（沿视线采样）。
         if (OcclusionCuller.get().shouldCull(tile)) {
             return;
         }
@@ -90,13 +92,21 @@ public abstract class MixinRenderGlobal {
             return false;
         }
 
-        // 异步判定：提交本帧的候选，并读取之前的结果。
-        AsyncOcclusionCuller.requestCheck(entity);
-        if (AsyncOcclusionCuller.isOccluded(entity.getEntityId())) {
-            return false;
+        // 异步路径启用时，<b>不再</b>走同步判定。
+        //
+        // 上一版两者都跑：异步提交一次、紧接着同步又打一遍射线 ——
+        // 同一条射线算两遍，且同步那遍还要抢射線预算。
+        // 这是"优化反而更慢"的典型，必须二选一。
+        if (LumenConfig.asyncOcclusion) {
+            AsyncOcclusionCuller.requestCheck(entity);
+            if (AsyncOcclusionCuller.isOccluded(entity.getEntityId())) {
+                return false;
+            }
+            // 异步结果尚未就绪：按可见处理（安全方向）。
+            return true;
         }
 
-        // 同步兜底：异步结果有 1~2 帧延迟，在它生效前用同步判定覆盖。
+        // 同步路径：受射线预算限制的当场判定。
         return !OcclusionCuller.get().shouldOcclude(entity);
     }
 }

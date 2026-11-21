@@ -172,6 +172,17 @@ public final class MixinTargetVerifier {
         SPECS.add(Spec.method("MixinRenderGlobalFacing getVisibleFacings",
                 "net/minecraft/client/renderer/RenderGlobal", "getVisibleFacings",
                 "(Lnet/minecraft/util/BlockPos;)Ljava/util/Set;"));
+
+        // ---- MixinLayerRenderer ----
+        //
+        // 远处实体低细节化。这是接口 mixin，注入点落在所有实现类的
+        // doRenderLayer 上。参数是 1 个实体 + 7 个 float。
+        //
+        // 这条校验尤其重要：接口方法如果写成 private 会被当成抽象声明，
+        // 注入静默失效；而 require = 0 让这种失败完全无提示。
+        SPECS.add(Spec.method("MixinLayerRenderer doRenderLayer",
+                "net/minecraft/client/renderer/entity/layers/LayerRenderer", "doRenderLayer",
+                "(Lnet/minecraft/entity/EntityLivingBase;FFFFFFF)V"));
     }
 
     private MixinTargetVerifier() {

@@ -100,6 +100,15 @@ public final class Lumen {
                 LumenConfig.skinLod, LumenConfig.skinLodLayerDistance,
                 LumenConfig.skinLodTexture, LumenConfig.skinLodTextureDistance);
         LumenProfiler.log().info("[Lumen] 可见面缓存: {}", LumenConfig.visibleFacingCache);
+        LumenProfiler.log().info("[Lumen] 远处实体 LoD: 装饰层={}（>{}格） 整体剔除={}（>{}格）",
+                LumenConfig.entityLod, LumenConfig.entityLodLayerDistance,
+                LumenConfig.entityLodCullDistance <= 0 ? "关闭" : "启用",
+                LumenConfig.entityLodCullDistance);
+        LumenProfiler.log().info("[Lumen] 贴图降采样: {}（1/{}，>{}格）",
+                LumenConfig.textureLod ? "启用" : "关闭",
+                LumenConfig.textureLodDivisor, LumenConfig.textureLodDistance);
+        LumenProfiler.log().info("[Lumen] 激进剔除: {}  树叶遮挡: {}",
+                LumenConfig.aggressiveCulling, LumenConfig.cullLeavesOcclusion);
 
         // 客户端专用的异步执行器在这里显式初始化，避免在类加载期做任何
         // 与线程/GL 相关的动作 —— 1.8.9 的类加载顺序并不保证渲染上下文已就绪。

@@ -72,6 +72,23 @@ public final class OcclusionCuller {
         return INSTANCE;
     }
 
+    /** 供 MoreCulling 的激进判定复用眼睛位置，避免重复计算。 */
+    public static double getEyeX() {
+        return INSTANCE.eyeX;
+    }
+
+    public static double getEyeY() {
+        return INSTANCE.eyeY;
+    }
+
+    public static double getEyeZ() {
+        return INSTANCE.eyeZ;
+    }
+
+    public static boolean isEyeValid() {
+        return INSTANCE.eyeValid;
+    }
+
     /** 每帧在世界渲染开始时调用一次，重置计数并缓存眼睛位置。 */
     public void beginFrame(World world, Entity viewEntity, float partialTicks) {
         this.world = world;
@@ -113,9 +130,12 @@ public final class OcclusionCuller {
             return false;
         }
 
-        AxisAlignedBB box = tile.getRenderBoundingBox();
+        AxisAlignedBB box = BlockEntityOptimizer.getRenderBoundingBox(tile);
         if (box == null) {
             BlockPos pos = tile.getPos();
+            // 用可变坐标构造，而不是每次 new 一个 AxisAlignedBB。
+            // 这里无法完全避免分配（AxisAlignedBB 不可变），
+            // 但只在包围盒为 null 这种罕见路径上发生。
             box = new AxisAlignedBB(pos.getX(), pos.getY(), pos.getZ(),
                     pos.getX() + 1, pos.getY() + 1, pos.getZ() + 1);
         }

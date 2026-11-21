@@ -296,9 +296,55 @@ val mixinGatingSelfTest by tasks.registering(JavaExec::class) {
     dependsOn(tasks.named("testClasses"))
 }
 
+/**
+ * 校验配置界面真的接上了 Forge 的 IModGuiFactory 契约。
+ *
+ * <p>这条检查来自一次真实故障：类没有 implements 该接口，只写了同名方法，
+ * 导致 Mods 页面的 Config 按钮<b>永久变灰</b>，且编译/启动全程无任何提示。
+ * Forge 判的是 isAssignableFrom，不是方法名，所以必须用反射验证。
+ */
+val configGuiSelfTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Ensures the Forge config GUI is reachable (i.e. IModGuiFactory is really implemented)."
+
+    classpath = files(
+        layout.buildDirectory.dir("classes/java/main"),
+        layout.buildDirectory.dir("classes/java/test"),
+        mainCompileClasspath
+    )
+
+    mainClass.set("top.fpvp.lumen.verify.ConfigGuiSelfTest")
+    dependsOn(tasks.named("testClasses"))
+}
+
+/**
+ * 光照引擎的<b>队列语义</b>回归测试。
+ *
+ * <p>守住一个真实发生过的 bug：减光 BFS 的判断里多了一个 OR 分支，
+ * 导致「天空光 15 被移除」时无条件清零所有邻居，级联把整片天空照亮区
+ * 清成 0 —— 表现就是"大批量方块出现后阴影渲染错误"。
+ *
+ * <p>测的是生产代码实际调用的 LightEngineQueueLogic（纯函数），
+ * 而不是测试里复制的一份逻辑。
+ */
+val lightEngineSemanticsSelfTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Guards the light-queue decrease semantics (the sky-light cascade bug)."
+
+    classpath = files(
+        layout.buildDirectory.dir("classes/java/main"),
+        layout.buildDirectory.dir("classes/java/test"),
+        mainCompileClasspath
+    )
+
+    mainClass.set("top.fpvp.lumen.verify.LightEngineSelfTest2")
+    dependsOn(tasks.named("testClasses"))
+}
+
 tasks.named("check") {
     dependsOn(verifyMixinTargets, dispatcherSelfTest, chunkTuningSelfTest,
-            lightEngineSelfTest, mixinGatingSelfTest)
+            lightEngineSelfTest, lightEngineSemanticsSelfTest,
+            mixinGatingSelfTest, configGuiSelfTest)
 }
 
 // 运行配置：1.8.9 的 launchwrapper 依赖 URLClassLoader（Java 9 起被移除），

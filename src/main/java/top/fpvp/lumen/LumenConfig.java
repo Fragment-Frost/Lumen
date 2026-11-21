@@ -77,8 +77,8 @@ public final class LumenConfig {
     public static boolean blockEntityOptimization = true;
 
     // ---- MoreCulling 风格 ----
-    /** 把树叶当作完整方块参与遮挡判定（树叶密集的森林里收益明显）。 */
-    public static boolean cullLeavesOcclusion = true;
+    // 树叶遮挡的开关在下面的"激进剔除"分组里声明（默认关闭），
+    // 不要在这里重复声明 —— Java 会直接编译失败。
     /** 信标光柱的视锥剔除（原版完全不剔除，远处的光柱一直画）。 */
     public static boolean beaconBeamCulling = true;
     /** 地图与告示牌的贴墙剔除（贴墙时只画朝外那一面）。 */
@@ -172,6 +172,114 @@ public final class LumenConfig {
      * 缓存到 tick 边界，避免转视角时的重复计算。
      */
     public static boolean visibleFacingCache = true;
+
+    // ---- 激进剔除 ----
+    /**
+     * 激进剔除模式。
+     *
+     * <p>把方块实体的剔除条件从「六面全包围」放宽到「朝眼方向被一个整方块挡住」。
+     *
+     * <p><b>它确实会在某些角度下让物体提前消失</b> —— 这是设计取舍而非 bug。
+     * 因此默认关闭。玩家自己与骑乘实体永远不参与。
+     */
+    public static boolean aggressiveCulling = false;
+    /**
+     * 树叶是否算作遮挡物。
+     *
+     * <p>能显著提升森林场景帧率，代价是被厚树叶挡住的实体提前消失。
+     * 默认关闭 —— 这个副作用在多人游戏里容易被误认为"实体隐身"。
+     */
+    public static boolean cullLeavesOcclusion = false;
+
+    // ---- 异步剔除预算 ----
+    /** 每帧最多提交多少条异步遮挡判定。0 = 用内置默认值（48）。 */
+    public static int asyncOcclusionBudget = 48;
+
+    // ---- 远处实体低分辨率化 ----
+    /**
+     * 远处实体使用低细节模型（LoD）。
+     *
+     * <p>参考 FPSFlow 的 Entity LOD：远处的生物跳过装饰性渲染层
+     * （羊毛、雪、装备、鞍具），只画主体模型。
+     */
+    public static boolean entityLod = true;
+    /** 超过这个距离（格）跳过实体装饰层。 */
+    public static double entityLodLayerDistance = 24.0D;
+    /** 超过这个距离（格）完全跳过实体渲染。0 = 不启用。 */
+    public static double entityLodCullDistance = 64.0D;
+
+    // ---- 贴图低分辨率化 ----
+    /**
+     * 远处方块/实体使用低分辨率纹理。
+     *
+     * <p>把远处的纹理降采样后上传，降低采样带宽与显存占用。
+     * <b>收益有限且风险实在</b>（切换纹理会造成 GL 绑定变更），
+     * 因此默认关闭，想试再开。
+     */
+    public static boolean textureLod = false;
+    /** 超过这个距离（格）使用低分辨率纹理。 */
+    public static double textureLodDistance = 48.0D;
+    /** 纹理降采样比例（2 = 长宽各减半，总面积 1/4）。 */
+    public static int textureLodDivisor = 2;
+
+    // ==== 声音 ====
+    /**
+     * 提高 Paulscode 的普通声道数。
+     *
+     * <p>反汇编确认原版 {@code SoundSystemConfig.numberNormalChannels = 28}。
+     * 而 {@code Library} 在构造时按这个值分配声道池，
+     * 池满后 {@code newSource} <b>静默失败</b> —— 声音直接不播。
+     * 这就是"人多/爆炸/下雨时部分声音消失"的根因。
+     */
+    public static boolean moreSoundChannels = true;
+    /** 目标声道数。256 在常见 OpenAL 实现上都远够用。 */
+    public static int soundChannels = 256;
+    /**
+     * 声音提交去重与限流。
+     *
+     * <p>同一 tick 内同位置同声音只播一次，并限制每 tick 总提交数。
+     * 人类听觉分辨不出同时叠加的十几层音效，去掉多余的不会听出差别。
+     */
+    public static boolean soundThrottle = true;
+    /** 每 tick 最多提交多少个声音。0 = 不限制。 */
+    public static int soundSubmissionsPerTick = 24;
+
+    // ==== 碰撞 ====
+    /**
+     * 碰撞检测优化（参考「加速碰撞」）。
+     *
+     * <p>原版每次 {@code getCollidingBoundingBoxes} 都 {@code new ArrayList}
+     * + {@code new MutableBlockPos}。改为按嵌套深度复用的列表池。
+     */
+    public static boolean collisionOptimization = true;
+
+    // ==== 物品渲染 ====
+    /**
+     * 缓存物品模型查找（Carbon 思路在 1.8.9 上可行的子集）。
+     *
+     * <p>真正的 GPU instancing 需要 GL 3.1+，1.8.9 用 LWJGL 2 没有。
+     * 能省的是 {@code ItemModelMesher.getItemModel} 的每帧重复查找。
+     */
+    public static boolean itemRenderCache = true;
+
+    // ==== 区块构建模式 ====
+    /**
+     * 区块构建等待策略：{@code threaded} / {@code semi_blocking} / {@code full_blocking}。
+     *
+     * <ul>
+     *   <li>{@code threaded}（线程化）：主线程完全不等，帧率最平滑，
+     *       但极远/新生成的区块可能短暂显示为白色空缺；</li>
+     *   <li>{@code semi_blocking}（半堵塞，默认）：每帧只等 2ms，
+     *       折中；</li>
+     *   <li>{@code full_blocking}（全堵塞）：等到构建完成，绝无白色空缺，
+     *       代价是跑图时明显顿挫。适合录屏/截图。</li>
+     * </ul>
+     */
+    public static String chunkBuildMode = "semi_blocking";
+    /** 半堵塞模式下每帧的等待预算（毫秒）。 */
+    public static int chunkBuildWaitMsSemi = 2;
+    /** 全堵塞模式下每帧的等待预算（毫秒）。 */
+    public static int chunkBuildWaitMsFull = 50;
     /** 每帧允许发射的遮挡检测射线数量上限（防止剔除本身变成瓶颈）。 */
     public static int occlusionRayBudget = 256;
     /** 遮挡检测射线的最大长度（格）。 */
@@ -244,6 +352,22 @@ public final class LumenConfig {
                 "把生物寻路（A*）移到后台线程。关闭后一切照旧走主线程。");
         pathfindRequestCooldown = cfg.getInt("pathfindRequestCooldown", CAT_THREADS, pathfindRequestCooldown, 0, 200,
                 "同一实体两次寻路请求的最小间隔（tick）。用于合并高频重复请求。");
+
+        // ---- 区块构建模式（三档）----
+        chunkBuildMode = cfg.getString("chunkBuildMode", CAT_THREADS, chunkBuildMode,
+                "区块构建等待策略：\n"
+                        + "  threaded       线程化，主线程完全不等。帧率最平滑，\n"
+                        + "                 但极远/新生成的区块可能短暂显示为白色空缺；\n"
+                        + "  semi_blocking  半堵塞，每帧只等一小段（默认，折中）；\n"
+                        + "  full_blocking  全堵塞，等到构建完成。绝无白色空缺，\n"
+                        + "                 但跑图时明显顿挫，适合录屏/截图。\n"
+                        + "注意：这三个模式不改变构建的并行度，那由 chunkBuilderThreads 控制。\n"
+                        + "它们改变的是「主线程愿意为等待构建结果付出多少时间」。");
+        chunkBuildWaitMsSemi = cfg.getInt("chunkBuildWaitMsSemi", CAT_THREADS, chunkBuildWaitMsSemi,
+                0, 16, "半堵塞模式每帧的等待预算（毫秒）。60fps 下 16.6ms 是整帧预算，\n"
+                + "所以这个值必须远小于它，否则半堵塞就变成了全堵塞。");
+        chunkBuildWaitMsFull = cfg.getInt("chunkBuildWaitMsFull", CAT_THREADS, chunkBuildWaitMsFull,
+                1, 200, "全堵塞模式每帧的等待预算（毫秒）。它不追求帧率，而是保证没有白色空缺。");
     }
 
     private static void loadCulling(Configuration cfg) {
@@ -264,8 +388,9 @@ public final class LumenConfig {
                         + "主线程只负责采集射线沿途的方块快照，判定在 worker 上完成，\n"
                         + "因此射线数量不再受主线程预算限制。结果有 1~2 帧延迟。");
         cullLeavesOcclusion = cfg.getBoolean("cullLeavesOcclusion", CAT_CULLING, cullLeavesOcclusion,
-                "把树叶也算作遮挡物（参考 MoreCulling）。\n"
-                        + "森林里收益明显，但被厚树叶挡住的实体会提前消失。");
+                "把树叶算作遮挡物（参考 MoreCulling）。\n"
+                        + "森林里收益明显，但被厚树叶挡住的实体会提前消失。\n"
+                        + "默认关闭——这个副作用在多人游戏里容易被误认为「实体隐身」。");
         beaconBeamCulling = cfg.getBoolean("beaconBeamCulling", CAT_CULLING, beaconBeamCulling,
                 "对信标光柱做视锥剔除（参考 MoreCulling）。原版几乎从不剔除光柱。");
         mapSignCulling = cfg.getBoolean("mapSignCulling", CAT_CULLING, mapSignCulling,
@@ -294,6 +419,17 @@ public final class LumenConfig {
                 "缓存 getVisibleFacings 的结果到 tick 边界（参考 Ixeris 对转视角掉帧的分析）。\n"
                         + "该结果只依赖方块数据、与相机朝向无关，而原版在朝向变化时会为每个\n"
                         + "可见区块重算一遍。视距 16 时是数百次重复计算。");
+
+        // ---- 激进剔除 ----
+        aggressiveCulling = cfg.getBoolean("aggressiveCulling", CAT_CULLING, aggressiveCulling,
+                "激进剔除：方块实体朝眼方向被遮挡即跳过（比默认的六面全包围更激进）。\n"
+                        + "警告：某些角度下物体可能提前消失，这是设计取舍而非 bug。\n"
+                        + "玩家自己与骑乘实体永远不参与。");
+        cullLeavesOcclusion = cfg.getBoolean("cullLeavesOcclusion", CAT_CULLING, cullLeavesOcclusion,
+                "把树叶算作遮挡物。显著提升森林帧率，\n"
+                        + "代价是被厚树叶挡住的实体提前消失（默认关闭）。");
+        asyncOcclusionBudget = cfg.getInt("asyncOcclusionBudget", CAT_CULLING, asyncOcclusionBudget,
+                0, 512, "每帧最多提交多少条异步遮挡判定。0 = 用内置默认值 48。");
     }
 
     private static void loadRender(Configuration cfg) {
@@ -307,6 +443,66 @@ public final class LumenConfig {
                         + "只缓存「恰好等于位置处单位立方体」的包围盒，随状态变化的（信标光柱等）不缓存。");
         removeRealmsButton = cfg.getBoolean("removeRealmsButton", CAT_RENDER, removeRealmsButton,
                 "从主菜单移除 Realms 按钮，并把 Mods 按钮补成整宽。");
+
+        // ---- 远处实体低分辨率化 ----
+        entityLod = cfg.getBoolean("entityLod", CAT_RENDER, entityLod,
+                "远处实体使用低细节模型：跳过装饰性渲染层（参考 FPSFlow 的 Entity LOD）。\n"
+                        + "玩家自己、其它玩家、以及玩家骑乘的实体永远保留完整渲染。");
+        entityLodLayerDistance = cfg.get(CAT_RENDER, "entityLodLayerDistance", entityLodLayerDistance,
+                "超过这个距离（格）跳过实体装饰层。", 4.0D, 256.0D).getDouble();
+        entityLodCullDistance = cfg.get(CAT_RENDER, "entityLodCullDistance", entityLodCullDistance,
+                "超过这个距离（格）完全跳过实体渲染。0 = 不启用。", 0.0D, 512.0D).getDouble();
+
+        // ---- 贴图低分辨率化 ----
+        textureLod = cfg.getBoolean("textureLod", CAT_RENDER, textureLod,
+                "远处方块/实体使用低分辨率纹理。默认关闭：\n"
+                        + "收益有限，而降采样要读回显存（同步等待）+ 切换 GL 绑定，\n"
+                        + "在 1.8.9 的单个大方块图集上可能得不偿失。想试再开。");
+        textureLodDistance = cfg.get(CAT_RENDER, "textureLodDistance", textureLodDistance,
+                "超过这个距离（格）使用低分辨率纹理。", 8.0D, 512.0D).getDouble();
+        textureLodDivisor = cfg.getInt("textureLodDivisor", CAT_RENDER, textureLodDivisor, 2, 8,
+                "纹理降采样比例（2 = 长宽各减半，总面积 1/4）。");
+
+        // ---- 物品渲染 ----
+        itemRenderCache = cfg.getBoolean("itemRenderCache", CAT_RENDER, itemRenderCache,
+                "缓存物品模型查找（参考 Carbon 的思路）。\n"
+                        + "真正的 GPU instancing 需要 GL 3.1+，1.8.9 用 LWJGL 2 没有；\n"
+                        + "这里做的是省掉 ItemModelMesher 的每帧重复查找。");
+
+        // ---- 区块构建模式 ----
+        chunkBuildMode = cfg.getString("chunkBuildMode", CAT_THREADS, chunkBuildMode,
+                "区块构建等待策略：\n"
+                        + "  threaded       线程化，主线程完全不等。帧率最平滑，\n"
+                        + "                 但极远/新生成的区块可能短暂显示为白色空缺；\n"
+                        + "  semi_blocking  半堵塞，每帧只等一小段（默认，折中）；\n"
+                        + "  full_blocking  全堵塞，等到构建完成。绝无白色空缺，\n"
+                        + "                 但跑图时明显顿挫，适合录屏/截图。\n"
+                        + "注意：这三个模式不改变构建的并行度，那由 chunkBuilderThreads 控制。");
+        chunkBuildWaitMsSemi = cfg.getInt("chunkBuildWaitMsSemi", CAT_THREADS, chunkBuildWaitMsSemi,
+                0, 16, "半堵塞模式每帧的等待预算（毫秒）。60fps 下 16.6ms 是整帧预算。");
+        chunkBuildWaitMsFull = cfg.getInt("chunkBuildWaitMsFull", CAT_THREADS, chunkBuildWaitMsFull,
+                1, 200, "全堵塞模式每帧的等待预算（毫秒）。它不追求帧率，而是保证没有白色空缺。");
+
+        // ---- 声音 ----
+        moreSoundChannels = cfg.getBoolean("moreSoundChannels", CAT_CORE, moreSoundChannels,
+                "提高 Paulscode 的普通声道数（默认 28 -> 256）。\n"
+                        + "原版 28 个声道用满后新声音会静默失败，\n"
+                        + "这是「人多/爆炸/下雨时部分声音消失」的根因。\n"
+                        + "注意：该值必须在声音系统初始化前生效，改动后需要重启游戏。");
+        soundChannels = cfg.getInt("soundChannels", CAT_CORE, soundChannels, 32, 1024,
+                "目标普通声道数。过高会占用更多 OpenAL 资源，256 通常足够。");
+        soundThrottle = cfg.getBoolean("soundThrottle", CAT_CORE, soundThrottle,
+                "同一 tick 内同位置同声音只播一次，并限制每 tick 总提交数。\n"
+                        + "避免一瞬间几十个声音请求把声道池打满。");
+        soundSubmissionsPerTick = cfg.getInt("soundSubmissionsPerTick", CAT_CORE,
+                soundSubmissionsPerTick, 0, 256,
+                "每 tick 最多提交多少个声音。0 = 不限制。");
+
+        // ---- 碰撞 ----
+        collisionOptimization = cfg.getBoolean("collisionOptimization", CAT_WORLD, collisionOptimization,
+                "碰撞检测优化（参考「加速碰撞」）。\n"
+                        + "原版每次 getCollidingBoundingBoxes 都新建 ArrayList 与 MutableBlockPos，\n"
+                        + "改为按嵌套深度复用的列表池。");
     }
 
     private static void loadWorld(Configuration cfg) {

@@ -24,6 +24,51 @@
 
 复杂度从 `O(改动数 × 区域面积)` 降到 `O(改动数 × 传播半径)`。
 
+#### 两个已修复的 bug（都出在这一层）
+
+**bug 1 —— 大批量方块出现时阴影渲染错误。**
+
+两个原因叠加：
+
+1. **在方块变更的当下就计算光照**。爆炸/结构生成一次改上千个方块时，
+   每次计算读到的都是**尚未稳定的邻居光值**。第一次变更把光灌进一片区域，
+   第二次变更基于那片"即将失效"的光再算一遍……一千次之后的结果，
+   与"等所有方块稳定后再算一次"完全不同，表现为残留亮斑或暗洞。
+   现在改为**只登记坐标、tick 边界统一 flush**，让增量算法拿到的输入自洽。
+
+2. **减光判定多了一个错误的 OR 分支**：
+
+   ```java
+   // 错的
+   if (neighborLevel < oldLevel || (oldLevel == MAX_LIGHT && type == SKY))
+   ```
+
+   那个后半段让「天空光 15 被移除」变成**无条件清零所有邻居**，
+   包括那些自己就能看到天空、本该保持 15 的方块。清零后它们又被压进
+   减光队列，于是"清零"沿整个天空照亮区**级联扩散**，把大片室外清成 0。
+
+   正确语义只有一条：`neighborLevel < oldLevel`。判断逻辑现在抽到
+   `LightEngineQueueLogic.shouldClearOnDecrease`（纯函数），
+   由 `lightEngineSemanticsSelfTest` 直接守住——包括那个关键用例
+   「移除值 15 时，相邻的 15 必须保留」。
+
+> 这个 bug 的可怕之处是**单点改方块时几乎不暴露**。只有大批量变更才把
+> 「天空光 15 被移除」这条路径踩出来。所以它必须有测试守着，
+> 不能靠"进游戏看看阴影对不对"。
+
+**bug 2 —— 时不时卡一下。**
+
+三处每帧分配与重复计算：
+
+- `AsyncOcclusionCuller` 每次 `requestCheck` 都 `new boolean[7]` + `new MutableBlockPos()`。
+  数百实体/帧 = 每秒上万个短命对象，直接推高 GC 频率。现在改用复用缓冲池 + 线程内游标。
+- `IN_FLIGHT` 标志泄漏：调度器在队列溢出时可能**既不 deliver 也不 discard**，
+  标志永久为 true，那个实体从此再也不被剔除。现在加了代次超时兜底。
+- **异步与同步路径重复计算**：上一版异步判定之后又跑了一次同步 `shouldOcclude`，
+  同一条射线算两遍。现在两者互斥，异步启用时不再调同步。
+
+#### 其他细节
+
 **与原版语义对齐的细节**（缺一就会出现细微画面差异）：
 - 天空光 `canSeeSky` 时原始值为 15；
 - `opacity >= 15 且发光 > 0` 时 opacity 折为 1（萤石/海晶灯的特例）；
@@ -32,6 +77,11 @@
 
 **零分配**：原版洪泛每个方块要 `new BlockPos` + `new MutableBlockPos`，
 这里全程用打包成 `int` 的坐标与复用的 `MutableBlockPos`。
+
+**单次 flush 有上限**（`MAX_FLUSH_POSITIONS = 4096`）：超出后本 tick 剩余请求
+全部交还原版。让 BFS 在一个 tick 里处理十万个位置会直接卡死这一帧——
+那正是"卡一下"的来源。另外同一区段变更超过 64 次时改用原版逐点校验，
+因为高密度下增量 BFS 的传播范围高度重叠，总成本反而更高。
 
 - 配置：`world.starlightLightEngine`（默认开）
 - **冲突自动降级**：检测到 OptiFine 等整体接管光照的 mod 时自动关闭引擎
@@ -219,22 +269,76 @@
 > 宁可每 tick 重算一次，也不能让玩家看到"方块拆了但那一面还是不画"。
 > 收益依然存在——同一 tick 内 `setupTerrain` 可能被多次调用（多 pass 渲染）。
 
+### 9. 远处实体低细节化（参考 FPSFlow 的 Entity LOD）
+
+策略是**保主体、砍装饰**，不是在某距离外整体隐藏——后者会让实体凭空消失/现身。
+
+拦在 `LayerRenderer#doRenderLayer`，这一个接口覆盖**所有**装饰层（羊毛、雪、马铠、鞍具……），
+不必为每种实体各写 mixin。远处跳过装饰层（`render.entityLod`，默认开）。
+
+**三项永远不砍**：玩家自己、其它玩家、玩家骑乘的实体。
+
+> 第二项是刻意的：PvP 里对手穿什么甲、拿什么物品是**战术信息**。
+> 砍掉等于让 mod 在 PvP 服上变成劣势。手持物品层与盔甲层也在此列。
+
+另有 `render.entityLodCullDistance`（默认 0=关闭）可在极远距离完全跳过实体，
+但会跳过**有自定义名字**的实体（命名牌通常是玩家特意标记的）。
+
+### 10. 贴图低分辨率化（默认关闭）
+
+**这个优化在 1.8.9 上的净收益可能是负的**，说实话：
+
+- 降采样要 `glGetTexImage` **读回显存**，那是同步操作，驱动里通常要等 GPU 管线排空；
+- 纹理切换有成本，远近物体交替会让 GL 绑定频繁变更；
+- 1.8.9 的方块纹理在一张大图集里，省下的显存只有几 MB。
+
+而且它做不到"近处清晰、远处省资源"——1.8.9 的方块图集无法逐方块降采样
+（要拆图集重建 UV，等于重写方块渲染管线）。实际能力只是"远处**渲染对象**用低分辨率纹理"。
+
+所以默认关闭，实现上做了三处缓解：结果永久缓存（每个纹理只做一次）、LRU 淘汰时真的删除 GL 纹理、任何异常静默回退原纹理。想试再开 `render.textureLod`。
+
+### 11. 激进剔除（默认关闭）
+
+`culling.aggressiveCulling` 把方块实体的剔除条件从「六面全包围」放宽到
+「朝眼方向被一个整方块挡住」。
+
+**它确实会在某些角度下让物体提前消失**——这是设计取舍，不是 bug。
+所以默认关闭，且玩家自己与骑乘实体永远不参与。只认整方块
+（玻璃、楼梯这类半透明方块后面依然能看到，拿它们做剔除会让人明显看出"东西不见了"）。
+
+`culling.cullLeavesOcclusion`（树叶算遮挡物）同理默认关闭——森林里收益明显，
+但被厚树叶挡住的实体会提前消失，在多人游戏里容易被误认为"实体隐身"。
+
 ## 配置界面
 
 Forge 1.8.9 **没有 ModMenu**（那是 Fabric 的 mod）。等价物是 Forge 内置的
 `IModGuiFactory`：在 Mods 列表里点 Config 进入，见 `client/LumenGuiFactory`。
 
-它用反射而非直接继承 `GuiConfig`。原因是个开发环境特有的坑：Forge universal jar 里
-`IModGuiFactory` 的方法签名**仍是混淆名**（`mainConfigGuiClass()` 返回 `Class<? extends axu>`），
-而开发用的 mapped jar 里 Minecraft 类已重映射成 MCP 名。两者混用编译直接失败，
-但在**实际游戏**里它们是同一个命名空间、完全一致。
-
-也就是说：直接写类型"开发环境编不过、运行时是对的"；反射两边都能跑。这是本项目唯一
-一处刻意的反射用法——类型系统在两种命名空间下无法同时满足，没有更好的选择。
+> **踩坑记录：Config 按钮变灰。**
+>
+> 第一版实现没有 `implements IModGuiFactory`，只写了同名方法（以为能"鸭子类型"）。
+> 结果 Mods 页面的 Config 按钮**永久变灰**，且编译通过、启动无日志、无崩溃。
+>
+> 根因在 Forge 内部（反编译 `GuiModList` 与 `FMLClientHandler` 确认）：
+> `getGuiFactoryFor()` 从一个 `BiMap<ModContainer, IModGuiFactory>` 取工厂，
+> 这个 Map 的填充**要求类真的实现该接口**，否则取出来是 `null`；
+> 紧接着 `GuiModList` 对它直接 `invokeinterface`，抛 NPE，异常被上层吞掉，
+> 按钮的 `enabled` 保持 false。
+>
+> **Forge 判的是 `isAssignableFrom`，不是方法名。**
+>
+> 而这个错误当初的诱因是我用错了编译 classpath（读到了混淆签名的
+> `forge-universal.jar`，`initialize(ave)` / `Class<? extends axu>`，看起来"实现不了"）。
+> 正确的编译依赖是 essential-loom 缓存里的 `forge/forge-mapped.jar`，
+> 签名是 `initialize(Minecraft)` / `Class<? extends GuiScreen>`，完全可以正常实现。
+>
+> 已加 `configGuiSelfTest` 守住这条契约 —— 它验证接口实现、
+> 四个方法、以及 `mainConfigGuiClass()` 返回类**是否有 `(GuiScreen)` 构造器**
+> （Forge 用 `getConstructor(GuiScreen.class)` 反射实例化，缺了会在玩家点按钮的瞬间才炸）。
 
 ## 构建期校验
 
-`check` 上挂了五个任务：
+`check` 上挂了七个任务：
 
 | 任务 | 作用 |
 |---|---|
@@ -242,7 +346,9 @@ Forge 1.8.9 **没有 ModMenu**（那是 Fabric 的 mod）。等价物是 Forge �
 | `dispatcherSelfTest` | 异步调度器的并发行为（队列满不阻塞、代次丢弃、worker 存活、防饿死） |
 | `chunkTuningSelfTest` | 区块线程自适应公式，重点验证 `builders >= workers` 不变量 |
 | `lightEngineSelfTest` | 光照引擎的开关语义与 mod 冲突降级 |
+| `lightEngineSemanticsSelfTest` | 光照队列的减光语义（守住"天空光级联清零"那个 bug） |
 | `mixinGatingSelfTest` | 每个纯客户端 mixin 是否都被正确门控（否则专用服务器启动失败） |
+| `configGuiSelfTest` | 配置界面是否真的接上 `IModGuiFactory`（否则 Config 按钮变灰） |
 
 `verifyMixinTargets` 存在的理由：`require = 0` 会让"目标不存在"静默通过 —— 功能完全失效，
 但游戏照常启动、日志干干净净。这类 bug 在运行时几乎无法定位，在构建期只需几毫秒。

@@ -1,14 +1,15 @@
 package top.fpvp.lumen.mixin;
 
-import net.minecraft.util.BlockPos;
 import net.minecraft.world.World;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import net.minecraft.util.BlockPos;
 import top.fpvp.lumen.lighting.LightEngine;
 import top.fpvp.lumen.lighting.LightingOptimizer;
+import top.fpvp.lumen.render.AsyncOcclusionCuller;
 import top.fpvp.lumen.render.BlockEntityOptimizer;
 import top.fpvp.lumen.render.VisibleFacingCache;
 import top.fpvp.lumen.world.FluidFlowCache;
@@ -21,15 +22,13 @@ import java.util.WeakHashMap;
  *
  * <p>按优先级从高到低有三种模式：
  * <ol>
- *   <li><b>Starlight 引擎</b>（{@link LightEngine}）：把 {@code checkLight} 完全
- *       替换为增量式增/减光 BFS。这是侵入性最强、收益也最大的模式；</li>
- *   <li><b>批处理</b>（{@link LightingOptimizer}）：保留原版洪泛，只做去重与
- *       延迟，收益较小但风险低；</li>
+ *   <li><b>Starlight 引擎</b>（{@link LightEngine}）：方块变化时只登记坐标，
+ *       tick 边界批量做增/减光 BFS。侵入性最强、收益也最大；</li>
+ *   <li><b>批处理</b>（{@link LightingOptimizer}）：保留原版洪泛，只做去重与延迟；</li>
  *   <li><b>原版</b>：两者都关闭或检测到冲突时。</li>
  * </ol>
  *
- * <p>模式选择在每次调用时判断，而不是在类加载时固定 —— 这样玩家在游戏内
- * 切换配置能立即生效，不需要重启。
+ * <p>模式在每次调用时判断，而不是类加载时固定 —— 这样游戏内切换配置立即生效。
  */
 @Mixin(World.class)
 public abstract class MixinWorld {
@@ -51,10 +50,14 @@ public abstract class MixinWorld {
     /**
      * 拦截 {@code setBlockState} 内部唯一的 {@code checkLight} 调用。
      *
-     * <p>该调用的返回值在字节码中会被 {@code pop} 掉，所以返回什么并不影响
-     * {@code setBlockState} 的语义。但必须注意：{@code @Redirect} 是<b>完全替换</b>
-     * 原调用，因此当优化被关闭、或队列处于冲刷状态时，必须自己把原版
-     * {@code checkLight} 调回去，否则光照将永远不会更新。
+     * <p>该调用的返回值在字节码中被 {@code pop} 掉，所以返回什么不影响
+     * {@code setBlockState} 的语义。但 {@code @Redirect} 是<b>完全替换</b>原调用，
+     * 因此当优化关闭时必须自己把原版 {@code checkLight} 调回去。
+     *
+     * <p><b>关键：这里只登记，不计算。</b>批量的真正处理在 {@link #lumen$flushLight}。
+     * 在方块变更的当下就计算光照，会读到尚未稳定的邻居光值，
+     * 大批量变更（爆炸、结构生成）时会算出一片错误的光 —— 这是上一版
+     * "阴影渲染错误"的根因。详见 {@link LightEngine} 的类注释。
      */
     @Redirect(
             method = "setBlockState(Lnet/minecraft/util/BlockPos;Lnet/minecraft/block/state/IBlockState;I)Z",
@@ -64,7 +67,7 @@ public abstract class MixinWorld {
             )
     )
     private boolean lumen$deferCheckLight(World world, BlockPos pos) {
-        // 第一优先：Starlight 引擎。
+        // 第一优先：Starlight 引擎（只登记，不计算）。
         if (LightEngine.isEnabled()) {
             return engineFor(world).onBlockChange(pos);
         }
@@ -77,65 +80,62 @@ public abstract class MixinWorld {
     }
 
     /**
-     * 每 tick 结束时冲刷。
+     * 冲刷光照队列。
      *
-     * <p>{@code World#tick} 会被子类通过 {@code super.tick()} 在最开始调用，
-     * 因此这里的 RETURN 实际落在 tick 的起始处 —— 正好把上一 tick 遗留的
-     * 校验补齐，保证新 tick 里的所有逻辑读到的是已更新的光照。
-     */
-    @Inject(method = "tick", at = @At("RETURN"))
-    private void lumen$flushAtTickStart(CallbackInfo ci) {
-        LightingOptimizer.get((World) (Object) this).flush();
-    }
-
-    /**
-     * 方块 tick 阶段结束时再冲刷一次，缩小同 tick 内的光照延迟窗口。
-     */
-    @Inject(method = "updateBlocks", at = @At("RETURN"))
-    private void lumen$flushAfterUpdateBlocks(CallbackInfo ci) {
-        LightingOptimizer.get((World) (Object) this).flush();
-    }
-
-    /**
-     * 实体 tick 结束时冲刷。
+     * <p>挂在 {@code updateEntities} 的 RETURN：爆炸、岩浆引燃、生物改方块
+     * 全部发生在实体 tick 里，这里冲刷能保证"同一 tick 内的所有方块变更
+     * 都已完成"之后才计算光照 —— 这正是增量算法需要的自洽输入。
      *
-     * <p>爆炸、岩浆引燃、生物改动方块等都在实体的 tick 里发生，而实体 tick
-     * 由 {@code MinecraftServer} 在 {@code world.tick()} 之外驱动。若不在这里
-     * 冲刷，这批光照要等到下一 tick 才开始计算。
+     * <p>为什么不在 {@code setBlockState} 之后立刻 flush：那等于没有延迟，
+     * 回到逐个计算的旧行为。
+     *
+     * <p>为什么不在 {@code tick} 的 HEAD flush：那时新 tick 的方块变更
+     * 已经开始，flush 会与它们交错。
      */
     @Inject(method = "updateEntities", at = @At("RETURN"))
-    private void lumen$flushAfterEntities(CallbackInfo ci) {
-        LightingOptimizer.get((World) (Object) this).flush();
-    }
-
-    /**
-     * 每 tick 开头推进流体缓存与可见面缓存的时间边界。
-     *
-     * <p>放在 tick 的 HEAD 而不是 RETURN：实体 tick 在 {@code updateEntities} 里，
-     * 而 {@code updateEntities} 由 {@code world.tick()} 内部调用。若在 RETURN 清缓存，
-     * 本 tick 内刚算好的流体向量会在下一次实体查询前被丢掉，等于完全没缓存。
-     *
-     * <p>可见面缓存同理需要每 tick 整体过期：它的结果依赖方块数据，
-     * 而方块随时可能被修改，1.8.9 又没有可靠的区块版本号可用。
-     */
-    @Inject(method = "tick", at = @At("HEAD"))
-    private void lumen$beginFluidTick(CallbackInfo ci) {
+    private void lumen$flushLight(CallbackInfo ci) {
         World world = (World) (Object) this;
-        if (FluidFlowCache.isEnabled()) {
-            FluidFlowCache.get().beginTick(world.getTotalWorldTime());
+        if (LightEngine.isEnabled()) {
+            engineFor(world).flush();
         }
-        VisibleFacingCache.beginTick(world.getTotalWorldTime());
+        LightingOptimizer.get(world).flush();
     }
 
     /**
-     * 每次 tick 开头清理方块实体包围盒缓存。
+     * 方块 tick 阶段结束时也冲刷一次。
      *
-     * <p>逐 tick 清理而不是逐帧：包围盒在一 tick 内不会变化，而缓存按
-     * 「实例 + 位置」比对，即使不清理也只会在方块实体被替换时失效 ——
-     * 但世界卸载后复用的位置可能撞上旧记录，清理最稳妥。
+     * <p>{@code updateBlocks} 里的随机 tick（草蔓延、火传播、流体流动）
+     * 同样会改方块。在它结束处再冲刷，能缩短"光照延迟到 tick 末"的窗口，
+     * 让紧接着的实体 tick 读到正确的光照。
+     */
+    @Inject(method = "updateBlocks", at = @At("RETURN"))
+    private void lumen$flushLightAfterBlocks(CallbackInfo ci) {
+        World world = (World) (Object) this;
+        if (LightEngine.isEnabled()) {
+            engineFor(world).flush();
+        }
+        LightingOptimizer.get(world).flush();
+    }
+
+    /**
+     * 每 tick 开头推进各个缓存的 tick 边界，并清理世界级临时状态。
+     *
+     * <p>放在 HEAD 而不是 RETURN：实体 tick 在 {@code updateEntities} 里，
+     * 而它在 {@code world.tick()} 内部。若在 RETURN 清缓存，本 tick 内
+     * 刚算好的数据会在下次查询前被丢掉，等于完全没缓存。
      */
     @Inject(method = "tick", at = @At("HEAD"))
-    private void lumen$resetBlockEntityCache(CallbackInfo ci) {
+    private void lumen$beginTick(CallbackInfo ci) {
+        World world = (World) (Object) this;
+        long time = world.getTotalWorldTime();
+        if (FluidFlowCache.isEnabled()) {
+            FluidFlowCache.get().beginTick(time);
+        }
+        VisibleFacingCache.beginTick(time);
+        // 方块实体包围盒缓存按 tick 清理：位置在 tick 内不会变化，
+        // 但世界卸载后复用的位置可能撞上旧记录。
         BlockEntityOptimizer.reset();
+        // 异步剔除器的迟滞计数按 tick 衰减，避免实体长期停在"已遮挡"状态。
+        AsyncOcclusionCuller.decayStreaks();
     }
 }

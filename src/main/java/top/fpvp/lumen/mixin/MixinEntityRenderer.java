@@ -11,6 +11,7 @@ import top.fpvp.lumen.render.OcclusionCuller;
 import top.fpvp.lumen.render.FrustumCache;
 import top.fpvp.lumen.render.ParticleOptimizer;
 import top.fpvp.lumen.render.SkinLod;
+import top.fpvp.lumen.render.EntityLod;
 
 /**
  * 在世界渲染开始时构建视锥，并重置本帧的剔除统计。
@@ -48,5 +49,8 @@ public abstract class MixinEntityRenderer {
         ParticleOptimizer.beginFrame(mc.getRenderViewEntity(), partialTicks);
         // 皮肤 LoD 的距离基准同上。
         SkinLod.beginFrame(mc.getRenderViewEntity(), partialTicks);
+        // 远处实体低细节化的距离基准（用的是摄像机位置，
+        // 旁观模式下它与玩家位置不同，而决定"看得清不清"的是摄像机）。
+        EntityLod.beginFrame(mc.getRenderViewEntity(), partialTicks);
     }
 }
