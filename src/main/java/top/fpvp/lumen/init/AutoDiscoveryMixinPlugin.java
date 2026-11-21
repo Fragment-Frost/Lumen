@@ -165,6 +165,7 @@ public class AutoDiscoveryMixinPlugin implements IMixinConfigPlugin {
             "MixinEntityRenderer",
             "MixinRenderGlobal",
             "MixinRenderGlobalFacing",
+            "MixinRenderGlobalUpdateChunks",
             "MixinEffectRenderer",
             "MixinMinecraft",
             "MixinGuiIngame",
@@ -172,6 +173,11 @@ public class AutoDiscoveryMixinPlugin implements IMixinConfigPlugin {
             "MixinLayerCape",
             "MixinLayerCustomHead",
             "MixinLayerRenderer",
+            "MixinSoundHandler",
+            "MixinSoundManager",
+            "MixinRenderItem",
+            "MixinRenderManager",
+            "MixinRenderManagerBackFace",
             "MixinChunkRenderDispatcher"
     };
 

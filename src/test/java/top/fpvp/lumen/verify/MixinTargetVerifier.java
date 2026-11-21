@@ -183,6 +183,64 @@ public final class MixinTargetVerifier {
         SPECS.add(Spec.method("MixinLayerRenderer doRenderLayer",
                 "net/minecraft/client/renderer/entity/layers/LayerRenderer", "doRenderLayer",
                 "(Lnet/minecraft/entity/EntityLivingBase;FFFFFFF)V"));
+
+        // ---- MixinRenderGlobalUpdateChunks ----
+        //
+        // 区块构建三档模式的唯一注入点。它必须是 public void 且接受一个 long ——
+        // 签名不符时 @ModifyVariable 会静默不生效（require = 0），
+        // 表现为"配了全堵塞但还是有白色空缺"，几乎无法归因。
+        SPECS.add(Spec.method("MixinRenderGlobalUpdateChunks updateChunks",
+                "net/minecraft/client/renderer/RenderGlobal", "updateChunks", "(J)V"));
+
+        // ---- MixinSoundHandler ----
+        SPECS.add(Spec.method("MixinSoundHandler playSound",
+                "net/minecraft/client/audio/SoundHandler", "playSound",
+                "(Lnet/minecraft/client/audio/ISound;)V"));
+        SPECS.add(Spec.method("MixinSoundHandler onResourceManagerReload",
+                "net/minecraft/client/audio/SoundHandler", "onResourceManagerReload",
+                "(Lnet/minecraft/client/resources/IResourceManager;)V"));
+
+        // ---- MixinSoundManager ----
+        //
+        // 声道数必须在声道池分配之前设置，而声道池在 Library 构造时按
+        // getNumberNormalChannels() 定型。这两条注入是重载路径的唯一机会。
+        //
+        // 这段校验的直接起因是一次真实的静默失败：reloadSoundSystem 曾被
+        // 错误地注入到 MixinSoundHandler 上（它是 SoundManager 的方法），
+        // 混入只给了一句 "Unable to determine descriptor for @Inject target
+        // method" 的警告就跳过了，而 require = 0 让这条注入彻底失声。
+        SPECS.add(Spec.method("MixinSoundManager reloadSoundSystem",
+                "net/minecraft/client/audio/SoundManager", "reloadSoundSystem", "()V"));
+        SPECS.add(Spec.method("MixinSoundManager loadSoundSystem（private）",
+                "net/minecraft/client/audio/SoundManager", "loadSoundSystem", "()V"));
+
+        // ---- MixinRenderItem ----
+        //
+        // 物品模型缓存的注入点。
+        SPECS.add(Spec.method("MixinRenderItem renderItemIntoGUI",
+                "net/minecraft/client/renderer/entity/RenderItem", "renderItemIntoGUI",
+                "(Lnet/minecraft/item/ItemStack;II)V"));
+
+        // ---- MixinWorldCollision ----
+        //
+        // 碰撞检测的 MutableBlockPos 复用点。
+        SPECS.add(Spec.method("MixinWorldCollision getCollidingBoundingBoxes",
+                "net/minecraft/world/World", "getCollidingBoundingBoxes",
+                "(Lnet/minecraft/entity/Entity;Lnet/minecraft/util/AxisAlignedBB;)Ljava/util/List;"));
+
+        // ---- MixinRenderManager ----
+        //
+        // 可调的实体/生物渲染范围 + 实体背面剔除。
+        //
+        // shouldRender 是原版唯一的"是否画这个实体"判定入口，
+        // 它内部只调 Render#shouldRender（视锥 + 距离权重）。
+        SPECS.add(Spec.method("MixinRenderManager shouldRender",
+                "net/minecraft/client/renderer/entity/RenderManager", "shouldRender",
+                "(Lnet/minecraft/entity/Entity;Lnet/minecraft/client/renderer/culling/ICamera;DDD)Z"));
+        // doRenderEntity 是实体渲染的 GL 状态入口，背面剔除在这里成对设置/恢复。
+        SPECS.add(Spec.method("MixinRenderManagerBackFace doRenderEntity",
+                "net/minecraft/client/renderer/entity/RenderManager", "doRenderEntity",
+                "(Lnet/minecraft/entity/Entity;DDDFFZ)Z"));
     }
 
     private MixinTargetVerifier() {

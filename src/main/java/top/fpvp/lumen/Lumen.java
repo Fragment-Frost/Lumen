@@ -109,6 +109,24 @@ public final class Lumen {
                 LumenConfig.textureLodDivisor, LumenConfig.textureLodDistance);
         LumenProfiler.log().info("[Lumen] 激进剔除: {}  树叶遮挡: {}",
                 LumenConfig.aggressiveCulling, LumenConfig.cullLeavesOcclusion);
+        LumenProfiler.log().info("[Lumen] 区块构建模式: {}（等待预算 {}ms）线程 {}",
+                LumenConfig.chunkBuildMode, top.fpvp.lumen.thread.ChunkThreadTuning.waitBudgetMs(),
+                top.fpvp.lumen.thread.ChunkThreadTuning.workerCount());
+        LumenProfiler.log().info("[Lumen] 声音: 声道 {}（原版 28） 限流={} {} 个/tick",
+                LumenConfig.moreSoundChannels ? LumenConfig.soundChannels : 28,
+                LumenConfig.soundThrottle, LumenConfig.soundSubmissionsPerTick);
+        LumenProfiler.log().info("[Lumen] 碰撞优化: {}  物品模型缓存: {}",
+                LumenConfig.collisionOptimization, LumenConfig.itemRenderCache);
+        LumenProfiler.log().info("[Lumen] 实体渲染范围: mob={} item={} player={} other={}（0=不限制）",
+                LumenConfig.entityRangeMob, LumenConfig.entityRangeItem,
+                LumenConfig.entityRangePlayer, LumenConfig.entityRangeOther);
+        LumenProfiler.log().info("[Lumen] 背面剔除: 实体={} 方块={}  检测到 OptiFine={}",
+                LumenConfig.entityBackFaceCulling, LumenConfig.blockBackFaceCulling,
+                top.fpvp.lumen.render.BackFaceCulling.isOptifinePresent());
+        LumenProfiler.log().info("[Lumen] 网络: 跳过冗余位置包={}（1.8.9 的 IO/编码本来就在 Netty 线程上）",
+                LumenConfig.skipRedundantPackets);
+        LumenProfiler.log().info("[Lumen] 像素合并={}（1.8.9 不可用） ASM 改写={}",
+                LumenConfig.pixelMerge, LumenConfig.asmOptimizations);
 
         // 客户端专用的异步执行器在这里显式初始化，避免在类加载期做任何
         // 与线程/GL 相关的动作 —— 1.8.9 的类加载顺序并不保证渲染上下文已就绪。

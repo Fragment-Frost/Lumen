@@ -203,6 +203,54 @@ public final class OcclusionCuller {
     }
 
     /**
+     * 激进剔除：实体在意<b>任何</b>不透明方块后面就隐藏。
+     *
+     * <p>与 {@link #shouldOcclude} 的区别：后者走固定 6 点采样，
+     * 只能发现"正对着"的遮挡，薄墙或斜角会漏判。这里做按距离自适应的
+     * 高密度射线追踪，只要视线上有一格实心方块就判定隐藏。
+     *
+     * <p><b>保护名单强制生效</b>，详见下面的判断。
+     */
+    public boolean shouldAggressivelyOcclude(Entity entity) {
+        if (!LumenConfig.enabled || !LumenConfig.aggressiveFullRay
+                || !LumenConfig.entityOcclusionCulling || !eyeValid || world == null) {
+            return false;
+        }
+        // 绝不剔除的东西。这些不是"优化不够激进"，而是硬性边界：
+        // 剔掉玩家自己 → 第三人称看不到自己；剔掉对手 → PvP 里失去战术信息；
+        // 剔掉骑乘目标 → 你骑的马消失。
+        if (entity == Minecraft.getMinecraft().getRenderViewEntity()) {
+            return false;
+        }
+        if (entity instanceof net.minecraft.entity.player.EntityPlayer) {
+            return false;
+        }
+        if (entity.ignoreFrustumCheck || entity.riddenByEntity != null
+                || entity.ridingEntity != null) {
+            return false;
+        }
+        // 有名字的实体通常是玩家特意标记的（命名牌），保留。
+        if (entity.hasCustomName()) {
+            return false;
+        }
+
+        AxisAlignedBB box = entity.getEntityBoundingBox();
+        if (box == null) {
+            return false;
+        }
+        double cx = (box.minX + box.maxX) * 0.5D;
+        double cy = (box.minY + box.maxY) * 0.5D;
+        double cz = (box.minZ + box.maxZ) * 0.5D;
+
+        if (MoreCulling.isFullyOccluded(world, cx, cy, cz, eyeX, eyeY, eyeZ)) {
+            LumenProfiler.culledEntities++;
+            return true;
+        }
+        LumenProfiler.visibleEntities++;
+        return false;
+    }
+
+    /**
      * 粒子视锥剔除。
      *
      * <p>原版对粒子完全不剔除：一个爆炸或刷怪笼就能产生上千个粒子，

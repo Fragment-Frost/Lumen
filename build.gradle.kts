@@ -341,10 +341,53 @@ val lightEngineSemanticsSelfTest by tasks.registering(JavaExec::class) {
     dependsOn(tasks.named("testClasses"))
 }
 
+/**
+ * 区块构建三档模式（线程化 / 半堵塞 / 全堵塞）的自测。
+ *
+ * <p>重点验证 {@code builders >= workers} 在所有档位下都成立 ——
+ * 违反它会导致 worker 永久阻塞在 {@code allocateRenderBuilder()}，
+ * 区块不再加载且<b>没有任何报错</b>。
+ */
+val chunkBuildModeSelfTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Validates the three chunk-build wait modes and the builders>=workers invariant."
+
+    classpath = files(
+        layout.buildDirectory.dir("classes/java/main"),
+        layout.buildDirectory.dir("classes/java/test"),
+        mainCompileClasspath
+    )
+
+    mainClass.set("top.fpvp.lumen.verify.ChunkBuildModeSelfTest")
+    dependsOn(tasks.named("testClasses"))
+}
+
+/**
+ * 实体渲染范围的自测。
+ *
+ * <p>守住的是「不能把不该藏的藏了」：玩家自己、其它玩家、骑乘目标、
+ * 命名实体永远不能被距离限制剔除。这些是语义边界而非可调参数，
+ * 破坏后的症状是"偶发看不见别人"，极难与网络/服务端问题区分。
+ */
+val entityRangeSelfTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Guards the entity render-range hard limits (players/riding/named must never be culled)."
+
+    classpath = files(
+        layout.buildDirectory.dir("classes/java/main"),
+        layout.buildDirectory.dir("classes/java/test"),
+        mainCompileClasspath
+    )
+
+    mainClass.set("top.fpvp.lumen.verify.EntityRangeSelfTest")
+    dependsOn(tasks.named("testClasses"))
+}
+
 tasks.named("check") {
     dependsOn(verifyMixinTargets, dispatcherSelfTest, chunkTuningSelfTest,
+            chunkBuildModeSelfTest,
             lightEngineSelfTest, lightEngineSemanticsSelfTest,
-            mixinGatingSelfTest, configGuiSelfTest)
+            mixinGatingSelfTest, configGuiSelfTest, entityRangeSelfTest)
 }
 
 // 运行配置：1.8.9 的 launchwrapper 依赖 URLClassLoader（Java 9 起被移除），

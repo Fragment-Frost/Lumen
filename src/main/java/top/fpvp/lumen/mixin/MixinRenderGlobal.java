@@ -92,6 +92,15 @@ public abstract class MixinRenderGlobal {
             return false;
         }
 
+        // 激进模式（完整射线追踪）：优先级最高，直接决定可见性。
+        //
+        // 放在异步路径之前是刻意的：异步结果有 1~2 帧延迟，
+        // 而激进模式的语义是"看不到就立刻不管"，不该被延迟影响。
+        // 它内部有完整的保护名单（玩家/骑乘/命名实体），见 OcclusionCuller。
+        if (OcclusionCuller.get().shouldAggressivelyOcclude(entity)) {
+            return false;
+        }
+
         // 异步路径启用时，<b>不再</b>走同步判定。
         //
         // 上一版两者都跑：异步提交一次、紧接着同步又打一遍射线 ——

@@ -137,5 +137,7 @@ public abstract class MixinWorld {
         BlockEntityOptimizer.reset();
         // 异步剔除器的迟滞计数按 tick 衰减，避免实体长期停在"已遮挡"状态。
         AsyncOcclusionCuller.decayStreaks();
+        // 声音的每 tick 去重/限流计数复位。
+        top.fpvp.lumen.audio.SoundOptimizer.beginTick();
     }
 }

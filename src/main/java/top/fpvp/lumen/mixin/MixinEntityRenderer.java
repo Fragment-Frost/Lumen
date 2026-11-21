@@ -52,5 +52,7 @@ public abstract class MixinEntityRenderer {
         // 远处实体低细节化的距离基准（用的是摄像机位置，
         // 旁观模式下它与玩家位置不同，而决定"看得清不清"的是摄像机）。
         EntityLod.beginFrame(mc.getRenderViewEntity(), partialTicks);
+        // 物品渲染的每帧一次性状态复位。
+        top.fpvp.lumen.render.ItemRenderOptimizer.beginFrame();
     }
 }

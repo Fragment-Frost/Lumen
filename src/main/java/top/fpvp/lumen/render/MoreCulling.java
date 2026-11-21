@@ -130,6 +130,107 @@ public final class MoreCulling {
      * 一格足够覆盖绝大多数场景，而长距离射线要查更多方块、
      * 且更容易因为中间隔着半透明方块而误判。
      */
+
+    /**
+     * 激进剔除的加强版：<b>只要视线上有任何不透明方块挡住，就剔除</b>。
+     *
+     * <h2>与 {@link #isAggressivelyCullable} 的区别</h2>
+     *
+     * <p>上面那个只朝眼睛方向<b>延伸一格</b>做判定，能处理"紧贴墙面"的情形，
+     * 但隔着两格以上的墙、或者被拐角挡住时都判不出来。
+     *
+     * <p>本方法做<b>完整的分层射线追踪</b>：从目标中心朝眼睛走一条采样线，
+     * 沿途任一采样点落在不透明整方块内 → 判定被挡住 → 剔除。
+     *
+     * <h2>这是真正的"激进"模式</h2>
+     *
+     * <p>用户要求的是「只要是看不到的，统统一点都不管」，所以这里
+     * <b>不再做保守妥协</b>：
+     * <ul>
+     *   <li>采样密度足够高（按距离自适应，每格 >= 2 个采样点），
+     *       薄墙也能采到；</li>
+     *   <li>只看"整方块且不透明"，不做半透明豁免 —— 玻璃后面依然能看到，
+     *       所以玻璃不算遮挡；</li>
+     *   <li>沿途遇到未加载区块立即放弃（按可见处理）——
+     *       这是唯一保留的保守点，因为未加载区块意味着数据不可信。</li>
+     * </ul>
+     *
+     * <h2>代价，必须说清楚</h2>
+     *
+     * <p>它仍然<b>可能误剔</b>：只采样一条从中心到眼睛的线，
+     * 而物体的可见体积不只是一个点。一个只露出边缘的箱子，
+     * 其中心线可能被挡住，于是被隐藏 —— 玩家会看到"箱子消失但屏幕上
+     * 本应有一角可见"。
+     *
+     * <p>这正是 Liubai 用"记录每个对象的<b>真实可见面积</b>、
+     * 只有完全被挡且连续确认两次才隐藏"来解决的问题。1.8.9 没有那套
+     * 逐对象可见面积记录，要做就得重写整个实体渲染管线。
+     *
+     * <p>所以这个模式<b>默认关闭</b>，且只在用户显式开启
+     * {@code culling.aggressiveCulling} + {@code culling.aggressiveFullRay}
+     * 时生效。玩家自己、其它玩家、骑乘目标、有自定义名字的实体
+     * <b>永远不参与</b>。
+     */
+    public static boolean isFullyOccluded(World world, double cx, double cy, double cz,
+                                          double eyeX, double eyeY, double eyeZ) {
+        if (!LumenConfig.enabled || !LumenConfig.aggressiveFullRay) {
+            return false;
+        }
+
+        double dx = eyeX - cx;
+        double dy = eyeY - cy;
+        double dz = eyeZ - cz;
+        double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist < 1.5D) {
+            // 贴太近：不剔除。玩家凑近看一个方块实体时把它藏起来最刺眼。
+            return false;
+        }
+        if (dist > LumenConfig.aggressiveRayRange) {
+            return false;
+        }
+
+        // 采样密度：每格至少 2 个点，保证薄墙（1 格厚）不会被跳过。
+        // 上限 64 个采样点，避免远距离时退化成大量方块查询。
+        int samples = (int) Math.min(64L, Math.max(4L, (long) (dist * 2.0D)));
+
+        BlockPos.MutableBlockPos cursor = CURSOR.get();
+        for (int i = 1; i < samples; i++) {
+            double t = (double) i / (double) samples;
+            int bx = (int) Math.floor(cx + dx * t);
+            int by = (int) Math.floor(cy + dy * t);
+            int bz = (int) Math.floor(cz + dz * t);
+            if (by < 0 || by > 255) {
+                continue;
+            }
+            cursor.set(bx, by, bz);
+            if (!world.isBlockLoaded(cursor)) {
+                // 未加载：数据不可信，保守按可见处理。
+                return false;
+            }
+            IBlockState state;
+            try {
+                state = world.getBlockState(cursor);
+            } catch (RuntimeException e) {
+                return false;
+            }
+            Block block = state.getBlock();
+            // 只有"不透明的整方块"才算遮挡。半透明（玻璃、水、冰）
+            // 挡不住视线，拿它们剔除会让东西明显消失。
+            if (block.isOpaqueCube() && block.isFullCube()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 线程内复用的游标，避免每次射线都 new。 */
+    private static final ThreadLocal<BlockPos.MutableBlockPos> CURSOR =
+            new ThreadLocal<BlockPos.MutableBlockPos>() {
+                @Override
+                protected BlockPos.MutableBlockPos initialValue() {
+                    return new BlockPos.MutableBlockPos();
+                }
+            };
     public static boolean isAggressivelyCullable(World world, TileEntity tile,
                                                  double eyeX, double eyeY, double eyeZ) {
         if (!LumenConfig.enabled || !LumenConfig.aggressiveCulling) {
@@ -220,7 +321,17 @@ public final class MoreCulling {
         if (isFullyEnclosed(world, tile)) {
             return true;
         }
-        // 3. 激进模式：朝眼方向被一个整方块挡住。
+        BlockPos pos = tile.getPos();
+        double cx = pos.getX() + 0.5D;
+        double cy = pos.getY() + 0.5D;
+        double cz = pos.getZ() + 0.5D;
+
+        // 3. 完整射线追踪（最激进）：视线上有任何不透明方块挡住就剔除。
+        //    放在"一格判定"之前，因为它的覆盖面更大。
+        if (isFullyOccluded(world, cx, cy, cz, eyeX, eyeY, eyeZ)) {
+            return true;
+        }
+        // 4. 一格判定：朝眼方向紧邻的一格被挡住。
         return isAggressivelyCullable(world, tile, eyeX, eyeY, eyeZ);
     }
 }

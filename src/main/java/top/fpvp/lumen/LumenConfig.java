@@ -191,6 +191,81 @@ public final class LumenConfig {
      */
     public static boolean cullLeavesOcclusion = false;
 
+    /**
+     * 激进剔除的<b>完整射线追踪</b>模式。
+     *
+     * <p>开启后，只要从物体中心到眼睛的视线上有<b>任何</b>不透明整方块，
+     * 该物体就被剔除（方块实体与实体都适用）。这比默认的
+     * "六面全包围 / 一格判定"激进得多。
+     *
+     * <p>参考 Liubai 的思路，但 1.8.9 缺少它最关键的那个前提 ——
+     * Liubai 记录每个对象在屏幕上<b>的真实可见面积</b>，
+     * 只有完全被挡且连续确认两次才隐藏。1.8.9 没有这套逐对象可见面积记录。
+     *
+     * <p>所以这里可能误剔：只露出边缘的箱子，其中心线被挡住就会消失。
+     * 默认关闭。玩家自己、其它玩家、骑乘目标、有名字的实体永远不参与。
+     */
+    public static boolean aggressiveFullRay = false;
+    /** 完整射线模式的最大距离（格）。超出不做判定。 */
+    public static double aggressiveRayRange = 32.0D;
+
+    // ==== 实体渲染范围 ====
+    /** 可调的实体渲染范围总开关。 */
+    public static boolean entityRenderRange = true;
+    /** 生物渲染距离（格）。0 = 不限制。 */
+    public static double entityRangeMob = 48.0D;
+    /** 掉落物渲染距离（格）。0 = 不限制。 */
+    public static double entityRangeItem = 64.0D;
+    /** 玩家渲染距离（格）。0 = 不限制（默认）。PvP 里缩这个会失去对手信息。 */
+    public static double entityRangePlayer = 0.0D;
+    /** 其它实体（箭、船、矿车）渲染距离（格）。0 = 不限制。 */
+    public static double entityRangeOther = 64.0D;
+
+    // ==== 背面剔除 ====
+    /**
+     * 实体背面剔除。默认开。
+     *
+     * <p>实体模型是六面全生成的，内部面完全看不到但依然提交给 GPU。
+     */
+    public static boolean entityBackFaceCulling = true;
+    /**
+     * 方块背面剔除。默认<b>关</b>。
+     *
+     * <p>1.8.9 的方块网格在生成阶段就只产生可见面，本来就没有背面 ——
+     * 再加一层没有收益。且检测到 OptiFine 时会自动跳过
+     * （它的区域渲染可能依赖双面渲染）。详见 {@code BackFaceCulling}。
+     */
+    public static boolean blockBackFaceCulling = false;
+
+    // ==== 网络 ====
+    /**
+     * 跳过内容完全相同的每 tick 位置包。
+     *
+     * <p>默认关：某些带反作弊的服务端依赖连续位置包做移动校验，
+     * 跳过可能导致误判。开启时有最大连续跳过数限制。
+     */
+    public static boolean skipRedundantPackets = false;
+
+    // ==== 像素合并 ====
+    /**
+     * 远处同色像素合并。
+     *
+     * <p><b>1.8.9 上无法实现</b>，开关保留但恒不生效。
+     * 原因见 {@code PixelMergeAnalysis}：颜色合并需要后处理 FBO
+     * （1.8.9 没有可用的离屏管线，而 glReadPixels 本身更贵），
+     * 几何合并需要改写区块网格索引（显示列表不可读）。
+     */
+    public static boolean pixelMerge = false;
+
+    // ==== ASM ====
+    /**
+     * ASM 字节码改写。
+     *
+     * <p><b>当前不启用任何变换</b>。调查确认原版"屎山"的开销接近零
+     * （Profiler 未启用时是一次布尔检查），详见 {@code AsmOptimizations}。
+     */
+    public static boolean asmOptimizations = false;
+
     // ---- 异步剔除预算 ----
     /** 每帧最多提交多少条异步遮挡判定。0 = 用内置默认值（48）。 */
     public static int asyncOcclusionBudget = 48;
@@ -330,6 +405,37 @@ public final class LumenConfig {
                 "Lumen 总开关。关闭后所有优化逻辑立即退化为原版行为（无需重启）。");
         enableLightBatching = cfg.getBoolean("enableLightBatching", CAT_CORE, enableLightBatching,
                 "光照校验批处理（Starlight 风格）。把同一 tick 内的 checkLight 去重后统一冲刷。");
+
+        // ---- 声音 ----
+        moreSoundChannels = cfg.getBoolean("moreSoundChannels", CAT_CORE, moreSoundChannels,
+                "提高 Paulscode 的普通声道数（默认 28 -> 256）。\n"
+                        + "反汇编确认 SoundSystemConfig.numberNormalChannels 默认是 28，\n"
+                        + "而 Library 在构造时按这个值分配声道池；池满后 newSource 静默失败，\n"
+                        + "声音直接不播。这就是「人多/爆炸/下雨时部分声音消失」的根因。\n"
+                        + "注意：该值必须在声音系统初始化前生效，改动后需要重启游戏。");
+        soundChannels = cfg.getInt("soundChannels", CAT_CORE, soundChannels, 32, 1024,
+                "目标普通声道数。过高会占用更多 OpenAL 资源，256 通常足够。");
+        soundThrottle = cfg.getBoolean("soundThrottle", CAT_CORE, soundThrottle,
+                "同一 tick 内同位置同声音只播一次，并限制每 tick 总提交数。\n"
+                        + "避免一瞬间几十个声音请求把声道池打满。");
+        soundSubmissionsPerTick = cfg.getInt("soundSubmissionsPerTick", CAT_CORE,
+                soundSubmissionsPerTick, 0, 256,
+                "每 tick 最多提交多少个声音。0 = 不限制。");
+
+        // ---- 网络 ----
+        skipRedundantPackets = cfg.getBoolean("skipRedundantPackets", CAT_CORE, skipRedundantPackets,
+                "跳过内容完全相同的每 tick 位置包。默认关闭：\n"
+                        + "某些带反作弊的服务端依赖连续位置包做移动校验，跳过可能被误判。\n"
+                        + "注意：1.8.9 的网络 IO 与编码本来就已在 Netty 线程上，\n"
+                        + "不需要也不应该再自己开线程池（会增加延迟并破坏包顺序）。");
+
+        // ---- 像素合并（不可用）----
+        pixelMerge = cfg.getBoolean("pixelMerge", CAT_RENDER, pixelMerge,
+                top.fpvp.lumen.render.PixelMergeAnalysis.explain());
+
+        // ---- ASM ----
+        asmOptimizations = cfg.getBoolean("asmOptimizations", CAT_DEBUG, asmOptimizations,
+                top.fpvp.lumen.asm.AsmOptimizations.explain());
     }
 
     private static void loadThreads(Configuration cfg) {
@@ -430,6 +536,42 @@ public final class LumenConfig {
                         + "代价是被厚树叶挡住的实体提前消失（默认关闭）。");
         asyncOcclusionBudget = cfg.getInt("asyncOcclusionBudget", CAT_CULLING, asyncOcclusionBudget,
                 0, 512, "每帧最多提交多少条异步遮挡判定。0 = 用内置默认值 48。");
+
+        // ---- 完整射线追踪（最激进）----
+        aggressiveFullRay = cfg.getBoolean("aggressiveFullRay", CAT_CULLING, aggressiveFullRay,
+                "完整射线追踪：只要视线上有任何不透明整方块挡住，该物体（方块实体与实体）就剔除。\n"
+                        + "这是最激进的模式，默认关闭。\n"
+                        + "注意：它只采样「中心到眼睛」一条线，所以只露出边缘的物体会被误剔。\n"
+                        + "1.8.9 缺少 Liubai 那套「逐对象真实可见面积」的记录，做不到更精确。\n"
+                        + "玩家自己、其它玩家、骑乘目标、有自定义名字的实体永远不参与。");
+        aggressiveRayRange = cfg.get(CAT_CULLING, "aggressiveRayRange", aggressiveRayRange,
+                "完整射线模式的最大判定距离（格）。超出不做判定。", 4.0D, 128.0D).getDouble();
+
+        // ---- 实体渲染范围 ----
+        entityRenderRange = cfg.getBoolean("entityRenderRange", CAT_CULLING, entityRenderRange,
+                "可调的实体渲染范围。1.8.9 没有「生物渲染距离」这个设置，\n"
+                        + "原版的距离控制是按实体类型写死的，导致 120 格外的僵尸\n"
+                        + "依然要走完整的模型变换、骨骼动画、纹理绑定。");
+        entityRangeMob = cfg.get(CAT_CULLING, "entityRangeMob", entityRangeMob,
+                "生物渲染距离（格）。0 = 不限制。", 0.0D, 256.0D).getDouble();
+        entityRangeItem = cfg.get(CAT_CULLING, "entityRangeItem", entityRangeItem,
+                "掉落物渲染距离（格）。0 = 不限制。缩太狠会导致「东西掉了却看不见」。",
+                0.0D, 256.0D).getDouble();
+        entityRangePlayer = cfg.get(CAT_CULLING, "entityRangePlayer", entityRangePlayer,
+                "玩家渲染距离（格）。默认 0 = 不限制。\n"
+                        + "PvP 里缩这个会让你在远距离看不见对手——不建议改。",
+                0.0D, 512.0D).getDouble();
+        entityRangeOther = cfg.get(CAT_CULLING, "entityRangeOther", entityRangeOther,
+                "其它实体（箭、船、矿车等）渲染距离（格）。0 = 不限制。", 0.0D, 256.0D).getDouble();
+
+        // ---- 背面剔除 ----
+        entityBackFaceCulling = cfg.getBoolean("entityBackFaceCulling", CAT_RENDER, entityBackFaceCulling,
+                "实体背面剔除。实体模型是六面全生成的，内部面完全看不到但依然提交给 GPU。\n"
+                        + "与 OptiFine 的区域渲染不冲突（实体渲染是独立阶段）。");
+        blockBackFaceCulling = cfg.getBoolean("blockBackFaceCulling", CAT_RENDER, blockBackFaceCulling,
+                "方块背面剔除。默认关闭：\n"
+                        + "1.8.9 的方块网格在生成阶段就只产生可见面，本来没有背面，\n"
+                        + "再加一层没有收益。检测到 OptiFine 时会自动跳过。");
     }
 
     private static void loadRender(Configuration cfg) {
@@ -470,34 +612,7 @@ public final class LumenConfig {
                         + "这里做的是省掉 ItemModelMesher 的每帧重复查找。");
 
         // ---- 区块构建模式 ----
-        chunkBuildMode = cfg.getString("chunkBuildMode", CAT_THREADS, chunkBuildMode,
-                "区块构建等待策略：\n"
-                        + "  threaded       线程化，主线程完全不等。帧率最平滑，\n"
-                        + "                 但极远/新生成的区块可能短暂显示为白色空缺；\n"
-                        + "  semi_blocking  半堵塞，每帧只等一小段（默认，折中）；\n"
-                        + "  full_blocking  全堵塞，等到构建完成。绝无白色空缺，\n"
-                        + "                 但跑图时明显顿挫，适合录屏/截图。\n"
-                        + "注意：这三个模式不改变构建的并行度，那由 chunkBuilderThreads 控制。");
-        chunkBuildWaitMsSemi = cfg.getInt("chunkBuildWaitMsSemi", CAT_THREADS, chunkBuildWaitMsSemi,
-                0, 16, "半堵塞模式每帧的等待预算（毫秒）。60fps 下 16.6ms 是整帧预算。");
-        chunkBuildWaitMsFull = cfg.getInt("chunkBuildWaitMsFull", CAT_THREADS, chunkBuildWaitMsFull,
-                1, 200, "全堵塞模式每帧的等待预算（毫秒）。它不追求帧率，而是保证没有白色空缺。");
-
-        // ---- 声音 ----
-        moreSoundChannels = cfg.getBoolean("moreSoundChannels", CAT_CORE, moreSoundChannels,
-                "提高 Paulscode 的普通声道数（默认 28 -> 256）。\n"
-                        + "原版 28 个声道用满后新声音会静默失败，\n"
-                        + "这是「人多/爆炸/下雨时部分声音消失」的根因。\n"
-                        + "注意：该值必须在声音系统初始化前生效，改动后需要重启游戏。");
-        soundChannels = cfg.getInt("soundChannels", CAT_CORE, soundChannels, 32, 1024,
-                "目标普通声道数。过高会占用更多 OpenAL 资源，256 通常足够。");
-        soundThrottle = cfg.getBoolean("soundThrottle", CAT_CORE, soundThrottle,
-                "同一 tick 内同位置同声音只播一次，并限制每 tick 总提交数。\n"
-                        + "避免一瞬间几十个声音请求把声道池打满。");
-        soundSubmissionsPerTick = cfg.getInt("soundSubmissionsPerTick", CAT_CORE,
-                soundSubmissionsPerTick, 0, 256,
-                "每 tick 最多提交多少个声音。0 = 不限制。");
-
+        // 这部分在 loadThreads 里，不在这里重复声明。
         // ---- 碰撞 ----
         collisionOptimization = cfg.getBoolean("collisionOptimization", CAT_WORLD, collisionOptimization,
                 "碰撞检测优化（参考「加速碰撞」）。\n"

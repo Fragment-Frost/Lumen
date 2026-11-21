@@ -309,7 +309,138 @@
 `culling.cullLeavesOcclusion`（树叶算遮挡物）同理默认关闭——森林里收益明显，
 但被厚树叶挡住的实体会提前消失，在多人游戏里容易被误认为"实体隐身"。
 
+### 11b. 完整射线追踪（最激进的剔除，默认关闭）
+
+`culling.aggressiveFullRay` 是「只要是看不到的，统统都不管」：
+从物体中心朝眼睛走一条**按距离自适应密度**的采样线（每格 ≥2 个采样点，
+保证 1 格厚的墙不会被跳过），沿途任一采样点落在**不透明整方块**内就剔除。
+方块实体与实体都适用。
+
+**参考了 Liubai，但必须说清楚 1.8.9 缺什么。**
+
+Liubai 的核心不是"打射线"，而是**记录每个对象在屏幕上的真实可见面积**，
+并且「只有完全被挡 + 连续确认两次」才隐藏；它还会在玩家移动后
+重新验证"那面墙是不是还挡着"，避免所有旧结论同时失效造成卡顿。
+1.8.9 没有这套逐对象可见面积记录，要做就得重写整个实体渲染管线。
+
+**所以这个模式会误剔**：只采样"中心到眼睛"一条线，
+一个只露出边缘的箱子，其中心线被挡住就会消失。
+这不是 bug，是缺少必要信息后的固有限制 —— 因此默认关闭。
+
+硬性保护名单（不参与剔除）：
+
+- 玩家自己（第三人称下消失最刺眼）
+- **其它玩家**（PvP 里是对手，画面里消失等于失去目标）
+- 骑乘目标与被骑乘者
+- 有自定义名字的实体（命名牌通常是玩家特意标记的）
+- 距离 < 1.5 格的物体（凑近看的时候藏起来最难受）
+
+> 沿途遇到未加载区块时立即放弃判定（按可见处理）。这是唯一保留的保守点 ——
+> 未加载区块意味着方块数据不可信，拿它做剔除会出现"走过去才发现东西没了"。
+
+### 12. 声音 —— 声道耗尽修复（这才是"多声音被卡"的根因）
+
+「声音多的时候其他声音播不完全」**不是异步能解决的**，而是一个硬性容量上限。
+
+反汇编 `paulscode.sound.SoundSystemConfig` 的静态初始化（偏移 42-48）确认：
+
+```java
+bipush 28  -> putstatic numberNormalChannels    // 普通声道 28
+iconst_4   -> putstatic numberStreamingChannels // 流式声道 4
+```
+
+而 `paulscode.sound.Library` 的构造函数里，`normalChannelSourceNames` 数组的
+长度就是 `getNumberNormalChannels()` —— **声道池在声音库初始化时就被固定**。
+
+`SoundManager#playSound` 走到 `sndSystem.newSource(...)`，底层从那个固定长度的
+池里找空闲槽；**找不到就直接失败，声音根本不播**，而且失败是静默的
+（只在 debug 日志里留一行）。
+
+一次爆炸能产生几十个声音请求，28 个槽瞬间用尽，第 29 个开始全部丢弃 ——
+这就是人多/爆炸/下雨时部分声音消失的准确成因。
+
+修复：在 `SoundHandler` 构造的最开始把声道数提到 256（`core.moreSoundChannels`）。
+
+> **为什么必须在声音库初始化前设置**：`Library` 构造时就把数组长度定死了。
+> 等声音系统启动后再调 `setNumberNormalChannels`，字段虽然变了，
+> 但已分配的数组不会重建 —— 改了也没用，表现为"配了 256 还是丢声音"。
+> 这类失败极难归因，所以注入点选在 `SoundHandler#<init>` 的 HEAD，
+> 并在 `reloadSoundSystem` 上加兜底（资源重载不走构造函数）。
+
+另外做了**去重与限流**（`core.soundThrottle`）：同一 tick 内同位置同声音只播一次，
+并限制每 tick 总提交数。人类听觉分辨不出同时叠加的十几层音效，
+去掉多余的不会听出差别。
+
+> **异步部分只做了一半，这是刻意的。** 真正的 `newSource` 不能挪到后台线程：
+> OpenAL 的 `alGenSources` 与 Paulscode 的 `Library` 内部状态都不是线程安全的
+> （`SoundSystem` 靠一个 `THREAD_SYNC` 监视器把命令串行化，绕开它会破坏状态机）。
+> 所以后台化的是"去重、限流、优先级排序"，真正调用仍在主线程，但频率被压下来了。
+
+### 13. 碰撞检测（参考「加速碰撞」）
+
+反汇编 `World#getCollidingBoundingBoxes` 确认了两个分配点：
+方法开头 `Lists.newArrayList()`（偏移 0-3），随后 `new BlockPos.MutableBlockPos()`
+（偏移 93-100）。
+
+**只优化第二个**，因为它只在方法内部使用、**不会逃逸**，换成复用实例与每次新建等价。
+
+那个 `ArrayList` **不能**安全复用：方法把它**返回给调用方**，
+调用方（`Entity#moveEntity` 等）会持有并遍历。要复用它就必须知道调用方何时用完，
+而 Java 没有可靠的"用完"通知。一旦漏归还、或内层重入覆盖了外层正在遍历的列表，
+表现是**实体卡住、穿墙、莫名被弹飞** —— 无法稳定复现，也几乎不可能归因。
+
+所以这里明确放弃那个收益（`world.collisionOptimization`）。
+
+### 14. 物品渲染（Carbon 思路在 1.8.9 上可行的子集）
+
+Carbon 是「物品模型渲染的 GPU instancing」。**真正的 instancing 在 1.8.9 上做不到**：
+
+| 需要什么 | 1.8.9 的实际情况 |
+|---|---|
+| GPU instancing（GL 3.1+） | LWJGL 2，默认 GL 2.1 上下文，`glDrawElementsInstanced` 不可用 |
+| 可复用的顶点缓冲 | `RenderItem` 每个物品 `pushMatrix` + 即时模式提交，没有可复用 VBO |
+| 模型与变换分离 | `handleCameraTransforms` 是 per-item 的，无法抽取 |
+
+强行用 `glBegin` 模拟 instancing 只会更慢。
+
+**能做的是消除 per-item 的冗余工作**：`renderItemIntoGUI` 第一件事就是
+`itemModelMesher.getItemModel(stack)`（偏移 0-8）。物品栏 36 格 + 容器 + HUD，
+每帧数百次调用，而同一个 `Item` + metadata 的模型**在两次资源重载之间是固定的**。
+
+缓存它（`render.itemRenderCache`）。缓存**在资源重载时清空** ——
+否则换材质包后会继续用旧模型，表现为"换了材质包但物品外观没变"，
+比不缓存糟糕得多。
+
+### 15. 区块构建三档模式：线程化 / 半堵塞 / 全堵塞
+
+这是本 mod 唯一一个**直接暴露给玩家调**的性能取舍，因为三者没有客观最优解，
+取决于你在做什么（跑图 / 录屏 / PvP）。
+
+| 模式 | 主线程等待 | 表现 |
+|---|---|---|
+| `threaded`（线程化） | 不等（0ms） | 帧率最平滑，极远/新生成的区块可能短暂显示为白色空缺 |
+| `semi_blocking`（半堵塞，默认） | 2ms | 折中。60fps 的帧预算是 16.6ms，2ms 是它的 12% |
+| `full_blocking`（全堵塞） | 50ms | 绝无白色空缺，但跑图时明显顿挫。适合录屏/截图 |
+
+注入点是 `RenderGlobal#updateChunks(long)` —— 主线程**唯一**等待区块构建的地方，
+它的参数就是"愿意等多少纳秒"（原版是 5ms）。三档本质就是往这个参数填不同值。
+
+> **这三个模式不改变构建的并行度**，那由 `threads.chunkBuilderThreads` 控制。
+> 它们改变的是"主线程愿意为等待构建结果付出多少时间"。
+> 这一点容易混淆，配置注释里也写了。
+
+两个实现细节：
+
+- **不能 `ci.cancel()` 跳过原方法**。原方法除了等待，还负责把 worker 完成的构建
+  **上传到显存**。跳过它会导致区块**永远**显示为白色空缺 —— 比原版的卡顿糟糕得多。
+  所以只用 `@ModifyVariable` 改参数，行为完全交给原方法。
+- **全堵塞模式下 worker 数会提高**。主线程既然在等，就不该还留着两个核空转；
+  此时不占用"留两核给主线程"的余量。而 `builders >= workers` 的不变量在三档下
+  都必须成立（`chunkBuildModeSelfTest` 逐档验证）—— 违反它会让 worker 永久
+  阻塞在 `allocateRenderBuilder()`，区块不再加载且**没有任何报错**。
+
 ## 配置界面
+
 
 Forge 1.8.9 **没有 ModMenu**（那是 Fabric 的 mod）。等价物是 Forge 内置的
 `IModGuiFactory`：在 Mods 列表里点 Config 进入，见 `client/LumenGuiFactory`。
@@ -338,7 +469,7 @@ Forge 1.8.9 **没有 ModMenu**（那是 Fabric 的 mod）。等价物是 Forge �
 
 ## 构建期校验
 
-`check` 上挂了七个任务：
+`check` 上挂了八个任务：
 
 | 任务 | 作用 |
 |---|---|
@@ -347,6 +478,7 @@ Forge 1.8.9 **没有 ModMenu**（那是 Fabric 的 mod）。等价物是 Forge �
 | `chunkTuningSelfTest` | 区块线程自适应公式，重点验证 `builders >= workers` 不变量 |
 | `lightEngineSelfTest` | 光照引擎的开关语义与 mod 冲突降级 |
 | `lightEngineSemanticsSelfTest` | 光照队列的减光语义（守住"天空光级联清零"那个 bug） |
+| `chunkBuildModeSelfTest` | 三档区块构建模式，逐档验证 `builders >= workers` 不变量 |
 | `mixinGatingSelfTest` | 每个纯客户端 mixin 是否都被正确门控（否则专用服务器启动失败） |
 | `configGuiSelfTest` | 配置界面是否真的接上 `IModGuiFactory`（否则 Config 按钮变灰） |
 

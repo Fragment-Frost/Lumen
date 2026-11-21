@@ -3,6 +3,7 @@ package top.fpvp.lumen.mixin;
 import net.minecraft.client.audio.ISound;
 import net.minecraft.client.audio.SoundHandler;
 import net.minecraft.client.audio.SoundManager;
+import net.minecraft.client.resources.IResourceManager;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -59,14 +60,26 @@ public abstract class MixinSoundHandler {
     }
 
     /**
-     * 兜底：资源重载时 {@code reloadSoundSystem} 会先卸载再重新加载，
-     * 那条路径不经过构造函数，需要在这里再设一次。
+     * 资源重载时重新确认声道数。
      *
-     * <p>注意 {@code loadSoundSystem} 是 private 且 synchronized，
-     * 但 mixin 可以直接注入 private 方法。
+     * <p>注意这里<b>不能</b>注入 {@code reloadSoundSystem} —— 它是
+     * {@code SoundManager} 的方法，而本 mixin 的目标是 {@code SoundHandler}。
+     * 写错目标时混入会给出
+     * "Unable to determine descriptor for @Inject target method" 警告，
+     * 然后<b>静默跳过</b>这条注入（因为 {@code require = 0}）。
+     *
+     * <p>那条路径的正确注入点在同目录的 {@link MixinSoundManager}。
+     * 这里改为挂在 {@code SoundHandler#onResourceManagerReload} 上：
+     * 这是资源重载在本类上的入口，{@code SoundHandler} 会在这里重建
+     * 声音索引并让 {@code SoundManager} 重载。
+     *
+     * <p>两处都保留是刻意的：{@code MixinSoundManager} 拦的是"声音系统本身
+     * 被重载"的底层路径，这里拦的是"资源包切换"的上层路径。
+     * 任何一条先到都能把声道数设好，{@code applyChannelCount()} 内部有
+     * 幂等保护，重复调用无害。
      */
-    @Inject(method = "reloadSoundSystem", at = @At("HEAD"), require = 0)
-    private void lumen$raiseSoundChannelsOnReload(CallbackInfo ci) {
+    @Inject(method = "onResourceManagerReload", at = @At("HEAD"), require = 0)
+    private void lumen$raiseSoundChannelsOnReload(IResourceManager manager, CallbackInfo ci) {
         SoundOptimizer.applyChannelCount();
     }
 
