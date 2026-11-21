@@ -6,6 +6,8 @@ import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
+import top.fpvp.lumen.lighting.LightEngine;
+import top.fpvp.lumen.lighting.LightEngineCompat;
 import top.fpvp.lumen.thread.AsyncTaskDispatcher;
 import top.fpvp.lumen.thread.ChunkThreadTuning;
 
@@ -28,7 +30,14 @@ import top.fpvp.lumen.thread.ChunkThreadTuning;
         modid = Lumen.MODID,
         name = Lumen.NAME,
         version = Lumen.VERSION,
-        acceptableRemoteVersions = "*"
+        acceptableRemoteVersions = "*",
+        // 客户端专用：注册 Forge 内置配置界面。
+        //
+        // 注意 Forge 1.8.9 没有 ModMenu（那是 Fabric 的 mod），
+        // 等价物就是这个 IModGuiFactory —— 在 Mods 列表里点 Config 进入。
+        // 用字符串而不是 class 字面量，是因为这个类引用客户端专属的 GUI 类，
+        // 在专用服务器上加载会 NoClassDefFoundError。
+        guiFactory = "top.fpvp.lumen.client.LumenGuiFactory"
 )
 public final class Lumen {
 
@@ -38,10 +47,27 @@ public final class Lumen {
 
     private static Configuration config;
 
+    /** 供配置界面读取配置对象。 */
+    public static Configuration getConfig() {
+        return config;
+    }
+
+    /** 供配置界面在关闭时立即写回文件。 */
+    public static void saveConfig() {
+        if (config != null && config.hasChanged()) {
+            config.save();
+        }
+    }
+
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
         config = new Configuration(event.getSuggestedConfigurationFile());
         LumenConfig.load(config);
+        // 首次启动时把默认值写进文件，否则玩家看到的是一个空 config，
+        // 得先猜有哪些项才能改。
+        if (config.hasChanged()) {
+            config.save();
+        }
     }
 
     @Mod.EventHandler
@@ -55,8 +81,25 @@ public final class Lumen {
         LumenProfiler.log().info("[Lumen] 光照批处理: {}", LumenConfig.enableLightBatching);
         LumenProfiler.log().info("[Lumen] 区块构建线程: {}", describeBuilderThreads());
         LumenProfiler.log().info("[Lumen] 异步寻路: {}", LumenConfig.asyncPathfinding);
-        LumenProfiler.log().info("[Lumen] 剔除: TESR={} Entity={} Particle={}",
-                LumenConfig.tileEntityCulling, LumenConfig.entityOcclusionCulling, LumenConfig.particleCulling);
+        LumenProfiler.log().info("[Lumen] 剔除: TESR={} Entity={} Particle={} Async={} Leaves={} Beacon={} Map={}",
+                LumenConfig.tileEntityCulling, LumenConfig.entityOcclusionCulling,
+                LumenConfig.particleCulling, LumenConfig.asyncOcclusion,
+                LumenConfig.cullLeavesOcclusion, LumenConfig.beaconBeamCulling,
+                LumenConfig.mapSignCulling);
+        LumenProfiler.log().info("[Lumen] 光照引擎: {}（冲突检测: {}）",
+                LightEngine.isEnabled() ? "Starlight 式增量引擎" : "原版/批处理",
+                LightEngineCompat.describe());
+        LumenProfiler.log().info("[Lumen] 方块实体包围盒缓存: {}  Realms 按钮: {}",
+                LumenConfig.blockEntityOptimization,
+                LumenConfig.removeRealmsButton ? "已移除" : "保留");
+        LumenProfiler.log().info("[Lumen] 粒子: 剔除={} LoD={}(mid={} far={}) 上限={}",
+                LumenConfig.particleCulling, LumenConfig.particleLod,
+                LumenConfig.particleLodMid, LumenConfig.particleLodFar,
+                LumenConfig.particleLimit == 0 ? "无限制" : LumenConfig.particleLimit);
+        LumenProfiler.log().info("[Lumen] 皮肤 LoD: 装饰层={}（>{}格） 纹理降采样={}（>{}格）",
+                LumenConfig.skinLod, LumenConfig.skinLodLayerDistance,
+                LumenConfig.skinLodTexture, LumenConfig.skinLodTextureDistance);
+        LumenProfiler.log().info("[Lumen] 可见面缓存: {}", LumenConfig.visibleFacingCache);
 
         // 客户端专用的异步执行器在这里显式初始化，避免在类加载期做任何
         // 与线程/GL 相关的动作 —— 1.8.9 的类加载顺序并不保证渲染上下文已就绪。

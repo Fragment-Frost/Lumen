@@ -7,28 +7,52 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import top.fpvp.lumen.lighting.LightEngine;
 import top.fpvp.lumen.lighting.LightingOptimizer;
+import top.fpvp.lumen.render.BlockEntityOptimizer;
+import top.fpvp.lumen.render.VisibleFacingCache;
 import top.fpvp.lumen.world.FluidFlowCache;
 
+import java.util.Map;
+import java.util.WeakHashMap;
+
 /**
- * 接管并合并 {@code World#setBlockState} 触发的光照校验。
+ * 光照系统接管点。
  *
- * <p>1.8.9 的 {@code setBlockState} 在方块的光照不透明度或发光值发生变化时，
- * 会立即调用 {@code checkLight(pos)}，而 {@code checkLight} 会对天空光与方块光
- * 各做一次 6 邻域洪泛。爆炸、多方块结构生成等场景会在同一 tick 内对同一批
- * 位置反复触发，造成大量重复计算。
+ * <p>按优先级从高到低有三种模式：
+ * <ol>
+ *   <li><b>Starlight 引擎</b>（{@link LightEngine}）：把 {@code checkLight} 完全
+ *       替换为增量式增/减光 BFS。这是侵入性最强、收益也最大的模式；</li>
+ *   <li><b>批处理</b>（{@link LightingOptimizer}）：保留原版洪泛，只做去重与
+ *       延迟，收益较小但风险低；</li>
+ *   <li><b>原版</b>：两者都关闭或检测到冲突时。</li>
+ * </ol>
  *
- * <p>这里把这一刻的校验登记到 {@link LightingOptimizer}，由它在 tick 边界
- * 统一去重后冲刷一次。
+ * <p>模式选择在每次调用时判断，而不是在类加载时固定 —— 这样玩家在游戏内
+ * 切换配置能立即生效，不需要重启。
  */
 @Mixin(World.class)
 public abstract class MixinWorld {
+
+    /** 每个世界一个引擎实例，弱引用避免世界卸载后泄漏。 */
+    private static final Map<World, LightEngine> ENGINES = new WeakHashMap<World, LightEngine>();
+
+    private static LightEngine engineFor(World world) {
+        synchronized (ENGINES) {
+            LightEngine engine = ENGINES.get(world);
+            if (engine == null) {
+                engine = new LightEngine(world);
+                ENGINES.put(world, engine);
+            }
+            return engine;
+        }
+    }
 
     /**
      * 拦截 {@code setBlockState} 内部唯一的 {@code checkLight} 调用。
      *
      * <p>该调用的返回值在字节码中会被 {@code pop} 掉，所以返回什么并不影响
-     * {@code setBlockState} 的语义。但必须注意：{@code @Redirect} 是**完全替换**
+     * {@code setBlockState} 的语义。但必须注意：{@code @Redirect} 是<b>完全替换</b>
      * 原调用，因此当优化被关闭、或队列处于冲刷状态时，必须自己把原版
      * {@code checkLight} 调回去，否则光照将永远不会更新。
      */
@@ -40,11 +64,15 @@ public abstract class MixinWorld {
             )
     )
     private boolean lumen$deferCheckLight(World world, BlockPos pos) {
+        // 第一优先：Starlight 引擎。
+        if (LightEngine.isEnabled()) {
+            return engineFor(world).onBlockChange(pos);
+        }
+        // 第二优先：批处理。
         if (LightingOptimizer.get(world).deferCheckLight(pos)) {
-            // 已登记，交由 tick 边界统一冲刷
             return false;
         }
-        // 优化关闭 / 队列过载 / 正在冲刷：立即执行原版逻辑
+        // 兜底：原版。
         return world.checkLight(pos);
     }
 
@@ -81,11 +109,14 @@ public abstract class MixinWorld {
     }
 
     /**
-     * 每 tick 开头推进流体缓存的时间边界。
+     * 每 tick 开头推进流体缓存与可见面缓存的时间边界。
      *
      * <p>放在 tick 的 HEAD 而不是 RETURN：实体 tick 在 {@code updateEntities} 里，
      * 而 {@code updateEntities} 由 {@code world.tick()} 内部调用。若在 RETURN 清缓存，
      * 本 tick 内刚算好的流体向量会在下一次实体查询前被丢掉，等于完全没缓存。
+     *
+     * <p>可见面缓存同理需要每 tick 整体过期：它的结果依赖方块数据，
+     * 而方块随时可能被修改，1.8.9 又没有可靠的区块版本号可用。
      */
     @Inject(method = "tick", at = @At("HEAD"))
     private void lumen$beginFluidTick(CallbackInfo ci) {
@@ -93,5 +124,18 @@ public abstract class MixinWorld {
         if (FluidFlowCache.isEnabled()) {
             FluidFlowCache.get().beginTick(world.getTotalWorldTime());
         }
+        VisibleFacingCache.beginTick(world.getTotalWorldTime());
+    }
+
+    /**
+     * 每次 tick 开头清理方块实体包围盒缓存。
+     *
+     * <p>逐 tick 清理而不是逐帧：包围盒在一 tick 内不会变化，而缓存按
+     * 「实例 + 位置」比对，即使不清理也只会在方块实体被替换时失效 ——
+     * 但世界卸载后复用的位置可能撞上旧记录，清理最稳妥。
+     */
+    @Inject(method = "tick", at = @At("HEAD"))
+    private void lumen$resetBlockEntityCache(CallbackInfo ci) {
+        BlockEntityOptimizer.reset();
     }
 }

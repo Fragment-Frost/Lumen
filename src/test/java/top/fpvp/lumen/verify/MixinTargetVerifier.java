@@ -124,6 +124,54 @@ public final class MixinTargetVerifier {
         // ---- MixinChunkRenderDispatcher ----
         SPECS.add(Spec.method("MixinChunkRenderDispatcher ctor",
                 "net/minecraft/client/renderer/chunk/ChunkRenderDispatcher", "<init>", "()V"));
+
+        // ---- MixinGuiMainMenu ----
+        //
+        // 移除 Realms 按钮靠的是 @Redirect 拦截 List#add。
+        // 这里校验两个前提：宿主方法存在、且它内部确实有 List#add 调用点。
+        // 后者尤其重要 —— 如果目标方法里没有 add 调用，mixin 会静默不生效
+        // （require = 0），表现为"Realms 按钮还在"却查不出原因。
+        SPECS.add(Spec.method("MixinGuiMainMenu addSingleplayerMultiplayerButtons",
+                "net/minecraft/client/gui/GuiMainMenu", "addSingleplayerMultiplayerButtons",
+                "(II)V"));
+        SPECS.add(Spec.invoke("MixinGuiMainMenu List.add redirect",
+                "net/minecraft/client/gui/GuiMainMenu", "addSingleplayerMultiplayerButtons",
+                "(II)V",
+                "java/util/List", "add", "(Ljava/lang/Object;)Z"));
+
+        // ---- MixinWorld tick HEAD（光照引擎/方块实体缓存重置） ----
+        //
+        // 这两个 @Inject 挂在 tick 的 HEAD 上；tick 本身已在上面校验过，
+        // 这里额外确认它有 Code 属性（不是抽象/桥接方法）。
+        SPECS.add(Spec.method("MixinWorld tick HEAD",
+                "net/minecraft/world/World", "tick", "()V"));
+
+        // ---- MixinLayerCape ----
+        //
+        // 皮肤 LoD 的披风跳过点。参数是 1 个玩家 + **7 个** float
+        // （limbSwing, limbSwingAmount, partialTicks, ageInTicks,
+        //  netHeadYaw, headPitch, scale），一共 8 个参数。
+        // 我第一版写成了 8 个 F，校验器直接抓出来了 —— 这类错误靠肉眼
+        // 数 float 个数几乎不可能可靠。
+        SPECS.add(Spec.method("MixinLayerCape doRenderLayer",
+                "net/minecraft/client/renderer/entity/layers/LayerCape", "doRenderLayer",
+                "(Lnet/minecraft/client/entity/AbstractClientPlayer;FFFFFFF)V"));
+
+        // ---- MixinLayerCustomHead ----
+        //
+        // 头饰层。注意参数类型是 EntityLivingBase（不是玩家类型），
+        // 因为同一层也被其它生物使用 —— 写成 EntityPlayer 会找不到方法。
+        SPECS.add(Spec.method("MixinLayerCustomHead doRenderLayer",
+                "net/minecraft/client/renderer/entity/layers/LayerCustomHead", "doRenderLayer",
+                "(Lnet/minecraft/entity/EntityLivingBase;FFFFFFF)V"));
+
+        // ---- MixinRenderGlobalFacing ----
+        //
+        // 可见面缓存的注入点。这个方法必须是 private 且返回 Set，
+        // 否则 @Inject 的 HEAD/RETURN 都会静默失败（require = 0）。
+        SPECS.add(Spec.method("MixinRenderGlobalFacing getVisibleFacings",
+                "net/minecraft/client/renderer/RenderGlobal", "getVisibleFacings",
+                "(Lnet/minecraft/util/BlockPos;)Ljava/util/Set;"));
     }
 
     private MixinTargetVerifier() {

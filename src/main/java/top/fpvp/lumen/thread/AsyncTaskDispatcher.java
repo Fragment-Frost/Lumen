@@ -273,8 +273,16 @@ public final class AsyncTaskDispatcher {
                     Thread.currentThread().interrupt();
                     return;
                 }
+                // queued == null 表示「两个队列都空，等待超时」，
+                // 这是空闲的正常状态，必须继续循环等下一个任务。
+                //
+                // 这里曾经写成 return，是一个极难发现的活性 bug：
+                // worker 启动后若 50ms 内没有任何任务到来，poll 超时返回 null，
+                // 线程就此永久退出 —— 之后提交的所有任务都堆在队列里没人取。
+                // 它不报错、不崩溃，只表现为「异步功能整体失效」，
+                // 而且自测若在启动后立刻提交任务就完全测不出来。
                 if (queued == null) {
-                    return;
+                    continue;
                 }
                 execute(queued.task);
             }

@@ -6,8 +6,11 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import top.fpvp.lumen.render.AsyncOcclusionCuller;
 import top.fpvp.lumen.render.OcclusionCuller;
 import top.fpvp.lumen.render.FrustumCache;
+import top.fpvp.lumen.render.ParticleOptimizer;
+import top.fpvp.lumen.render.SkinLod;
 
 /**
  * 在世界渲染开始时构建视锥，并重置本帧的剔除统计。
@@ -37,5 +40,13 @@ public abstract class MixinEntityRenderer {
 
         net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getMinecraft();
         OcclusionCuller.get().beginFrame(mc.theWorld, mc.getRenderViewEntity(), partialTicks);
+        // 异步剔除器独立维护自己的眼睛位置与代次：它需要在本帧内推进代次，
+        // 以便把上一帧在途的请求标记为“可交付”。
+        AsyncOcclusionCuller.beginFrame(mc.theWorld, mc.getRenderViewEntity(), partialTicks);
+        // 粒子的数量/距离预算按帧重置；距离基准也在这一帧锁定，
+        // 避免同一帧内因摄像机插值变化导致远近判定不一致。
+        ParticleOptimizer.beginFrame(mc.getRenderViewEntity(), partialTicks);
+        // 皮肤 LoD 的距离基准同上。
+        SkinLod.beginFrame(mc.getRenderViewEntity(), partialTicks);
     }
 }

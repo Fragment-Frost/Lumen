@@ -26,6 +26,7 @@ public final class DispatcherSelfTest {
     private static int failures;
 
     public static void main(String[] args) throws Exception {
+        testWorkerSurvivesIdle();
         testQueueFullDoesNotBlock();
         testAllTasksAccountedFor();
         testExceptionDoesNotKillWorker();
@@ -38,6 +39,55 @@ public final class DispatcherSelfTest {
         } else {
             System.out.println(failures + " dispatcher self-test(s) FAILED.");
             System.exit(1);
+        }
+    }
+
+    /**
+     * 回归测试：worker 在空闲一段时间后必须仍然存活。
+     *
+     * <p>这条用例针对一个曾经存在、且极其隐蔽的活性 bug：
+     * {@code Worker#run()} 把 {@code nextTask()} 返回 {@code null}
+     * （两个队列都空、等待超时）误判为「该退出了」并 {@code return}，
+     * 于是 worker 在启动 50ms 后若没等到任务就永久退出。
+     *
+     * <p>后果是<b>所有异步功能静默失效</b>：任务照样入队、队列长度在涨，
+     * 但永远没人执行；不崩溃、不报错、日志干净。
+     *
+     * <p>之所以难被测出来：只要测试在启动后<b>立刻</b>提交任务，
+     * 就能抢在 50ms 超时之前完成。因此这条用例刻意<b>先空等</b>一段时间，
+     * 再提交任务。
+     */
+    private static void testWorkerSurvivesIdle() throws Exception {
+        AsyncTaskDispatcher d = newDispatcher(8);
+        try {
+            // 先让 worker 空转，越过多轮 poll 超时。
+            Thread.sleep(400L);
+
+            final AtomicInteger computed = new AtomicInteger();
+            final String[] runner = new String[1];
+            d.submit(new AsyncTask<Object>() {
+                @Override
+                protected Object compute() {
+                    runner[0] = Thread.currentThread().getName();
+                    computed.incrementAndGet();
+                    return Boolean.TRUE;
+                }
+            }, AsyncTaskDispatcher.Priority.REALTIME);
+
+            long deadline = System.currentTimeMillis() + 2_000L;
+            while (System.currentTimeMillis() < deadline && computed.get() == 0) {
+                Thread.sleep(10L);
+            }
+
+            check("worker survives idle period", computed.get() == 1,
+                    "空闲 400ms 后提交的任务未被任何 worker 执行（computed="
+                            + computed.get() + "，说明 worker 已退出）");
+            // 顺带确认真的是 worker 线程执行的，而不是被主线程代劳。
+            check("task ran on worker thread",
+                    runner[0] != null && runner[0].startsWith("Lumen-Worker"),
+                    "实际执行线程=" + runner[0]);
+        } finally {
+            d.shutdown();
         }
     }
 

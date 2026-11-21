@@ -243,11 +243,10 @@ public final class OcclusionCuller {
     }
 
     /**
-     * 某个浮点坐标所处的方块是否“完全挡光”。
+     * 某个浮点坐标所处的方块是否"完全挡光"。
      *
-     * <p>{@code isOpaqueCube()} 保证不透光，{@code isFullCube()} 保证没有空隙。
-     * 两者必须同时成立：只看前者的话，台阶、楼梯、栅栏这些不透明但非整块的形状
-     * 也会被当成遮挡物，玩家会看到“半个方块后面的东西凭空消失”。
+     * <p>具体的判定规则在 {@link MoreCulling#isOccluding}，那里同时处理了
+     * "树叶是否算遮挡物"这个可配置项。这里只负责把浮点坐标折算成方块坐标。
      */
     private boolean isOpaqueAt(double x, double y, double z) {
         int bx = MathHelper.floor_double(x);
@@ -269,7 +268,6 @@ public final class OcclusionCuller {
         if (state == null) {
             return false;
         }
-        Block block = state.getBlock();
-        return block.isOpaqueCube() && block.isFullCube();
+        return MoreCulling.isOccluding(world, cursor, state);
     }
 }

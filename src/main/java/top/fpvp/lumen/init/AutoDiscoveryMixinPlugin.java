@@ -164,9 +164,13 @@ public class AutoDiscoveryMixinPlugin implements IMixinConfigPlugin {
     private static final String[] CLIENT_ONLY_SUFFIXES = {
             "MixinEntityRenderer",
             "MixinRenderGlobal",
+            "MixinRenderGlobalFacing",
             "MixinEffectRenderer",
             "MixinMinecraft",
             "MixinGuiIngame",
+            "MixinGuiMainMenu",
+            "MixinLayerCape",
+            "MixinLayerCustomHead",
             "MixinChunkRenderDispatcher"
     };
 

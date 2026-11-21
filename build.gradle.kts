@@ -255,8 +255,50 @@ val chunkTuningSelfTest by tasks.registering(JavaExec::class) {
     dependsOn(tasks.named("testClasses"))
 }
 
+/**
+ * 光照引擎的开关语义与冲突降级自测。
+ *
+ * <p>注意：光照<b>传播</b>的正确性无法在裸 JVM 上验证（需要完整 World/Chunk），
+ * 必须进游戏确认。这个任务只覆盖可直接验证的不变式。
+ */
+val lightEngineSelfTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Validates light engine gating and mod-conflict downgrade."
+
+    classpath = files(
+        layout.buildDirectory.dir("classes/java/main"),
+        layout.buildDirectory.dir("classes/java/test"),
+        mainCompileClasspath
+    )
+
+    mainClass.set("top.fpvp.lumen.verify.LightEngineSelfTest")
+    dependsOn(tasks.named("testClasses"))
+}
+
+/**
+ * 校验纯客户端 mixin 是否都被正确门控。
+ *
+ * <p>自动发现插件会注册 mixin 包下的每一个类。纯客户端 mixin 若未门控，
+ * 专用服务器会因目标类缺失而启动失败，且堆栈全是 ASM 帧，几乎无法定位。
+ * 这个检查把这类错误提前到构建期。
+ */
+val mixinGatingSelfTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Ensures every client-only mixin is gated out on dedicated servers."
+
+    classpath = files(
+        layout.buildDirectory.dir("classes/java/main"),
+        layout.buildDirectory.dir("classes/java/test"),
+        mainCompileClasspath
+    )
+
+    mainClass.set("top.fpvp.lumen.verify.MixinGatingSelfTest")
+    dependsOn(tasks.named("testClasses"))
+}
+
 tasks.named("check") {
-    dependsOn(verifyMixinTargets, dispatcherSelfTest, chunkTuningSelfTest)
+    dependsOn(verifyMixinTargets, dispatcherSelfTest, chunkTuningSelfTest,
+            lightEngineSelfTest, mixinGatingSelfTest)
 }
 
 // 运行配置：1.8.9 的 launchwrapper 依赖 URLClassLoader（Java 9 起被移除），
