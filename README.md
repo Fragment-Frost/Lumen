@@ -86,7 +86,8 @@
 - 配置：`world.starlightLightEngine`（默认开）
 - **冲突自动降级**：检测到 OptiFine 等整体接管光照的 mod 时自动关闭引擎
   并退回批处理；检测到光影/动态光源这类「消费光照」的 mod 时只关闭区段折叠。
-  冲突原因会打进日志。这部分不做的话，两个光照引擎会互相覆盖结果，
+  冲突原因显示在配置界面的 `status.lightConflict`（本项目不使用日志）。
+  这部分不做的话，两个光照引擎会互相覆盖结果，
   表现为光照闪烁/残留亮斑，且**不崩溃** —— 几乎无法归因。
 - 引擎启用时 `LightingOptimizer` 的批处理会完全让路（两者同时生效会互相破坏）。
 
@@ -354,7 +355,7 @@ iconst_4   -> putstatic numberStreamingChannels // 流式声道 4
 
 `SoundManager#playSound` 走到 `sndSystem.newSource(...)`，底层从那个固定长度的
 池里找空闲槽；**找不到就直接失败，声音根本不播**，而且失败是静默的
-（只在 debug 日志里留一行）。
+（原版只在 debug 日志里留一行，而本 mod 已不输出日志）。
 
 一次爆炸能产生几十个声音请求，28 个槽瞬间用尽，第 29 个开始全部丢弃 ——
 这就是人多/爆炸/下雨时部分声音消失的准确成因。
@@ -439,6 +440,154 @@ Carbon 是「物品模型渲染的 GPU instancing」。**真正的 instancing �
   都必须成立（`chunkBuildModeSelfTest` 逐档验证）—— 违反它会让 worker 永久
   阻塞在 `allocateRenderBuilder()`，区块不再加载且**没有任何报错**。
 
+### 16. 网络 —— 为什么 1.8.9 **不需要**把收发包异步
+
+「把收包发包异步」这个方向，查证后发现前提不成立，这里必须说清楚，否则会做出一个纯属有害的改动。
+
+反汇编 `NetworkManager#sendPacket` 与 `dispatchPacket`：
+
+```java
+sendPacket(packet):
+    flushOutboundQueue();
+    dispatchPacket(packet, null);
+
+dispatchPacket(...):
+    if (channel.eventLoop().inEventLoop()) {
+        channel.writeAndFlush(packet);          // 已在 Netty 线程：直接写
+    } else {
+        channel.eventLoop().execute(runnable);  // 不在 Netty 线程：投递过去
+    }
+```
+
+**管道的读写本来就在 Netty 的 eventLoop 上。** 主线程调用 `sendPacket` 只是把包交出去就返回，连 `Packet → ByteBuf` 的编码都被排进 Netty 线程队列。这一层不存在同步阻塞。
+
+所以**不**自建线程池，三个理由中任何一个都足以否决：
+
+1. Netty 的 `Channel` 写入**必须**在其 eventLoop 上，自建池最后还是要 `execute`，等于多一次跳转；
+2. `Packet` 往往持有**主线程正在修改**的引用（实体、区块、玩家状态），延迟到别的线程编码会读到撕裂数据 —— 表现为偶发崩溃或位置错乱，无法稳定复现；
+3. 包的**顺序**在 MC 协议里有语义，自建池打乱顺序会直接被踢下线。
+
+实际做的是**减少发包量**：`core.skipRedundantPackets` 跳过内容完全相同的每 tick 位置包。**默认关闭**——某些带反作弊的服务端依赖连续位置包做移动校验，跳过可能被误判。开启时也有最大连续跳过数（4 tick）兜底。
+
+### 17. 远处同色像素合并 —— 1.8.9 上不可行
+
+这个想法方向是对的，但 1.8.9 没有实现它的立足点。
+
+「同色像素合并」在图形学里对应两类技术，两者都做不了：
+
+| 技术 | 需要什么 | 1.8.9 的实际情况 |
+|---|---|---|
+| 色彩量化 + 索引化 | 离屏 FBO 后处理 | 没有可用的离屏管线。用 `glReadPixels` 读回再量化上传，是**两次全屏显存传输**，比省下的绘制贵一个数量级 |
+| 几何合并（合并相邻同色三角形） | 可读写的顶点/索引缓冲 | 区块网格是 `glCallList` 编译好的显示列表，**内容不可读不可改** |
+
+要突破第二点就得整个替换区块渲染器（重写 `RenderChunk`、`VboRenderList`、`ChunkRenderDispatcher`）—— 那已经是一个渲染器 mod，不是一个优化 mod 了。
+
+配置项 `render.pixelMerge` 保留但**恒不生效**，`PixelMergeAnalysis.explain()` 会把原因写进配置文件和配置界面 —— 不让它看起来像是"打开了但没用"。
+
+替代方案（都已实现，且**不改变剩余物体的外观**）：实体 LoD、实体渲染范围、遮挡剔除、粒子降频。它们的共同点是：要么不画，要么少画，画出来的和原版一致。
+
+### 18. 可调生物渲染范围
+
+1.8.9 **没有**「生物渲染距离」这个设置。唯一的距离控制是 `Render#getRenderDistanceWeight` 与各实体的 `getMaxRenderDistanceSquared()`，都按类型写死。结果：视距 16 时，120 格外的僵尸依然要走完整模型变换、骨骼动画、纹理绑定。
+
+注入在 `RenderManager#shouldRender`（它只做一件事：调 `Render#shouldRender`），一处覆盖所有实体类型。四个独立配置：
+
+| category | 默认 | 为什么 |
+|---|---|---|
+| `entityRangeMob` | 48 | 远处生物就是个色块，48 格外缩掉基本无法察觉 |
+| `entityRangeItem` | 64 | 掉落物是玩家主动寻找的东西，缩太狠会"东西掉了却看不见" |
+| `entityRangePlayer` | **0（不限制）** | PvP 里是对手，缩这个等于让人看不见远处敌人 |
+| `entityRangeOther` | 64 | 箭、船、矿车 |
+
+「0 = 不限制」这个约定很容易写错成"距离 0"，所以有专门的测试守着。
+
+**永远不缩**：玩家自己、骑乘目标与被骑乘者、有自定义名字的实体、`ignoreFrustumCheck` 的实体。`entityRangeSelfTest` 守住这些边界。
+
+### 19. 方块与实体背面剔除（以及和 OptiFine 区域渲染的关系）
+
+**先说清一件可能出乎意料的事：1.8.9 的方块渲染本来就没有背面。**
+
+区块网格在**生成阶段**就只产生可见面：被完全包围的方块不生成四边形，相邻实心方块的接触面也不生成。这比背面剔除更彻底 —— 背面剔除是丢掉"已经存在的背面三角形"，而原版根本不生成它们。
+
+所以对方块再加一层剔除**没有收益，只有风险**（依赖双面渲染的 mod 模型会缺面）。`render.blockBackFaceCulling` 默认关闭。
+
+真正缺的是**实体**：`ModelBase` 的盒子是六面全生成的，内部面完全看不到但依然提交给 GPU。`render.entityBackFaceCulling` 默认开启，在 `doRenderEntity` 的 HEAD/RETURN **成对**设置与恢复。
+
+> 成对这点是必须的：只开不关会让后续的粒子、光晕、GUI 叠加层都处于剔除状态，
+> 而它们大量使用面向摄像机的四边形 —— 开启背面剔除会让它们整片消失。
+> 这类 bug 看起来像"UI 渲染坏了"，极难归因到实体渲染上。
+
+**与 OptiFine 区域渲染的冲突**（你问得对）：
+
+- OptiFine 的 Region Renderer 作用于**方块**网格，把多个区块合并成一次 draw call；
+- 1.8.9 的方块网格本来就只含可见面，两者在同一层面，本 mod 不改方块网格也不动索引缓冲，**碰不到它**；
+- **会冲突的情形**：如果某个 OptiFine 版本在合并时保留了背向面、并依赖"不开启 cull"来显示它们，强制 cull 就会让那些面消失。
+
+因此：**检测到 OptiFine 时方块侧自动跳过**（用 `Class.forName(..., false, ...)` 探测，不触发它的静态初始化），状态显示在配置界面的 `status.optifine`。实体侧不受影响 —— 实体渲染与区域渲染是两个独立阶段，不共享 GL 状态假设。
+
+### 20. ASM 删除"屎山代码" —— 调查后决定不做
+
+反汇编验证了两个最常被怀疑的目标，结论都是**不值得动**：
+
+**Profiler**（`startSection`/`endSection`）：
+
+```java
+public void startSection(String name);
+  0: getfield  profilingEnabled:Z    // 读一个布尔字段
+  4: ifne      8
+  7: return                          // 未启用 profiling → 立即返回
+```
+
+第一条指令就检查开关，未启用时只付一次字段读取 + 一次分支预测。而 `RenderGlobal` 整个类里只有 **5 处** `startSection`。全删掉省下的也是每秒几千次字段读取，淹没在噪声里。而删除它需要定位每一对 start/end、保持栈平衡、处理异常表 —— 收益 0，风险不小。
+
+**空检查与边界检查**：单次成本是一个比较 + 分支预测（现代 CPU 预测成功近乎免费）。删掉不会更快，但会让错误数据直接进数组下标，崩溃堆栈指向一处"本来没问题"的代码。
+
+ASM 的特殊风险在于它**绕过了类型系统与编译器检查**：写错不会编译失败，而是运行期某个远处的 `VerifyError`，或与 OptiFine 同时改写同一方法导致游戏直接起不来。
+
+所以 `debug.asmOptimizations` 保留但 `AsmOptimizations.isEnabled()` **恒返回 false**，调查结论写在 `AsmOptimizations.explain()` 里并输出到配置界面。
+
+> 这不是偷懒。在"用 ASM 改字节码"这件事上，**没有证据支持的改动一律不做**。
+> 如果后续找到有实测收益的目标，在那里加，并补一个用 `CheckClassAdapter`
+> 验证改写后字节码合法的测试。
+
+### 21. 替换原版"垃圾算法" —— 逐项实证，结论是大部分不该动
+
+BetterFPS 的思路是替换原版低效算法。我逐项查了 1.8.9 里几个最常被点名的目标，**结论和预期相反**，这里如实记录。
+
+| 目标 | 假设 | 实测/反汇编结论 |
+|---|---|---|
+| `MathHelper.sin/cos` | 用 `Math.sin` 慢 | **已经是查表**：`SIN_TABLE[(int)(f*10430.378f) & 65535]`，无可优化 |
+| `getEntitiesWithinAABB` | 遍历全部实体 | **已经按区块分桶**：先算 chunk 范围再逐块取实体 |
+| `Vec3i.hashCode` | 低质量、聚簇严重 | **实测不差于 splitmix64**，见下 |
+| `Profiler` | 调用开销大 | 未启用时是**一次布尔检查**就返回 |
+| `getAllInBoxMutable` | 每次分配 | 确实每次 new 两个 `BlockPos` + 迭代器 —— **这一项是真的** |
+
+#### 哈希那条要展开说，因为我一开始判断错了
+
+原版 `Vec3i.hashCode()` 是 `(y + z*31)*31 + x`，`x` 只贡献 `+1` 差异。我据此推断沿 x 轴会聚簇。
+
+**实测否定了这个推断。** 跨 8×8 区块、16 格高的 262144 个坐标散列到 4096 桶：
+
+```
+原版   (y + z*31)*31 + x : 最大桶 67
+splitmix64 混合          : 最大桶 95
+```
+
+单区块局部坐标、世界坐标（x=1000）、跨区块三种分布下，原版都不差甚至更好。
+
+原因是 `HashMap` 自己还会做 `h ^= h >>> 16` 高位扰动，且桶索引用 `hash & (cap-1)`——连续哈希恰好均匀落到连续桶。
+
+**所以不替换原版哈希。** 这个结论我写进了 `FastHash` 的类注释，防止以后有人（包括我）再基于同样的错误推理做无用改动。
+
+但保留了两样**收益确定、与哈希质量无关**的东西：
+
+- `FastHashMap.LongKeyMap`：以 `BlockPos.toLong()` 为键的开放寻址表，**零装箱、零 BlockPos 对象**。`HashMap<BlockPos,V>` 要么需要 `BlockPos` 实例、要么装箱成 `Long`，而坐标编码几乎全在 `LongCache` 之外，每次都产生新对象；
+- `FastHash.forEachInBox`：替代 `getAllInBoxMutable`，零分配。
+
+> 这里 `mix()` 仍然必要，理由不同：`toLong()` 的位布局是 x 在高位、z 在低位，
+> 直接取低 32 位做桶索引会让 **x 维度完全塌陷**。自建表没有 HashMap 的高位扰动兜底，
+> 必须自己混。这是"自建 64 位键表要自己混哈希"，与"替换 Vec3i.hashCode"是两件事。
+
 ## 配置界面
 
 
@@ -469,7 +618,7 @@ Forge 1.8.9 **没有 ModMenu**（那是 Fabric 的 mod）。等价物是 Forge �
 
 ## 构建期校验
 
-`check` 上挂了八个任务：
+`check` 上挂了十个任务：
 
 | 任务 | 作用 |
 |---|---|
@@ -479,6 +628,8 @@ Forge 1.8.9 **没有 ModMenu**（那是 Fabric 的 mod）。等价物是 Forge �
 | `lightEngineSelfTest` | 光照引擎的开关语义与 mod 冲突降级 |
 | `lightEngineSemanticsSelfTest` | 光照队列的减光语义（守住"天空光级联清零"那个 bug） |
 | `chunkBuildModeSelfTest` | 三档区块构建模式，逐档验证 `builders >= workers` 不变量 |
+| `entityRangeSelfTest` | 实体渲染范围的硬性边界（玩家/骑乘/命名实体永不被剔） |
+| `fastHashSelfTest` | 开放寻址表语义 + 如实记录哈希分布对照（结论是原版更均匀） |
 | `mixinGatingSelfTest` | 每个纯客户端 mixin 是否都被正确门控（否则专用服务器启动失败） |
 | `configGuiSelfTest` | 配置界面是否真的接上 `IModGuiFactory`（否则 Config 按钮变灰） |
 
@@ -507,6 +658,43 @@ path(sub=88,done=88,skip=0)
 - `HUD` / `Fluid`：缓存命中率
 - `dropped`：队列满被丢弃的任务数（持续增长说明队列容量偏小）
 - `slow`：超出时间预算的任务数（持续增长说明某项计算退化了）
+
+出现异常时，第一行末尾会追加以 `Err(` 开头的段：
+
+```
+Lumen: ...  Err(task=2 deliver=0 discard=1 tex=0 cfg=0)
+```
+
+## 本项目不使用日志
+
+所有 `log4j` 输出已移除。这是一项明确的取舍，代价必须写清楚：**运行期出问题时不再有日志可查。**
+
+原来靠日志传达的信息，现在改到三个地方：
+
+| 原日志内容 | 现在在哪看 |
+|---|---|
+| 启动配置摘要（30+ 项） | 配置界面 → `status` 分类（每次打开刷新） |
+| 光照 mod 冲突提示 | 配置界面 `status.lightConflict`；引擎自动降级 |
+| 异步任务/纹理/配置异常 | F3 的 `Err(...)` 段 |
+| 声道数、线程数等派生值 | 配置界面 `status` 分类 |
+
+### 删日志时真正需要小心的地方
+
+不是"删掉一行 info"，而是**那些只有一行日志的 `catch` 块**——删掉后它们变成空块，静默吞掉异常。
+
+处理方式统一为**计数 + 注释说明**，而不是留空：
+
+```java
+} catch (Throwable t) {
+    // 隔离交付期间的异常，绝不让它冒到主线程。
+    // 日志已移除，改为计数（见 LumenProfiler.asyncDeliverErrors）。
+    LumenProfiler.asyncDeliverErrors++;
+}
+```
+
+被计数的地方：`asyncTaskErrors`、`asyncDeliverErrors`、`asyncDiscardErrors`、`textureLodFailures`、`configErrors`。它们全部汇总进 F3 的 `Err(...)` 段——**不看日志之后，那是唯一能发现"有东西在偷偷失败"的地方**。
+
+`try/catch` 的**隔离作用**全部保留。删的是输出，不是安全性：后台任务的异常依然不会冒到主线程。
 
 ## 配置
 

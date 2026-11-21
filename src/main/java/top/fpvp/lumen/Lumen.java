@@ -74,67 +74,27 @@ public final class Lumen {
     @SideOnly(Side.CLIENT)
     public void init(FMLInitializationEvent event) {
         if (!LumenConfig.enabled) {
-            LumenProfiler.log().info("[Lumen] 总开关已关闭，所有优化退化为原版行为。");
+            // 总开关关闭：不做任何初始化。
+            //
+            // 原本这里会打一行日志告知玩家。日志已全部移除，
+            // 所以这个状态只在配置界面里可见 —— 玩家自己关的开关，
+            // 回到配置界面就能看到，不需要额外提示。
             return;
         }
-
-        LumenProfiler.log().info("[Lumen] 光照批处理: {}", LumenConfig.enableLightBatching);
-        LumenProfiler.log().info("[Lumen] 区块构建线程: {}", describeBuilderThreads());
-        LumenProfiler.log().info("[Lumen] 异步寻路: {}", LumenConfig.asyncPathfinding);
-        LumenProfiler.log().info("[Lumen] 剔除: TESR={} Entity={} Particle={} Async={} Leaves={} Beacon={} Map={}",
-                LumenConfig.tileEntityCulling, LumenConfig.entityOcclusionCulling,
-                LumenConfig.particleCulling, LumenConfig.asyncOcclusion,
-                LumenConfig.cullLeavesOcclusion, LumenConfig.beaconBeamCulling,
-                LumenConfig.mapSignCulling);
-        LumenProfiler.log().info("[Lumen] 光照引擎: {}（冲突检测: {}）",
-                LightEngine.isEnabled() ? "Starlight 式增量引擎" : "原版/批处理",
-                LightEngineCompat.describe());
-        LumenProfiler.log().info("[Lumen] 方块实体包围盒缓存: {}  Realms 按钮: {}",
-                LumenConfig.blockEntityOptimization,
-                LumenConfig.removeRealmsButton ? "已移除" : "保留");
-        LumenProfiler.log().info("[Lumen] 粒子: 剔除={} LoD={}(mid={} far={}) 上限={}",
-                LumenConfig.particleCulling, LumenConfig.particleLod,
-                LumenConfig.particleLodMid, LumenConfig.particleLodFar,
-                LumenConfig.particleLimit == 0 ? "无限制" : LumenConfig.particleLimit);
-        LumenProfiler.log().info("[Lumen] 皮肤 LoD: 装饰层={}（>{}格） 纹理降采样={}（>{}格）",
-                LumenConfig.skinLod, LumenConfig.skinLodLayerDistance,
-                LumenConfig.skinLodTexture, LumenConfig.skinLodTextureDistance);
-        LumenProfiler.log().info("[Lumen] 可见面缓存: {}", LumenConfig.visibleFacingCache);
-        LumenProfiler.log().info("[Lumen] 远处实体 LoD: 装饰层={}（>{}格） 整体剔除={}（>{}格）",
-                LumenConfig.entityLod, LumenConfig.entityLodLayerDistance,
-                LumenConfig.entityLodCullDistance <= 0 ? "关闭" : "启用",
-                LumenConfig.entityLodCullDistance);
-        LumenProfiler.log().info("[Lumen] 贴图降采样: {}（1/{}，>{}格）",
-                LumenConfig.textureLod ? "启用" : "关闭",
-                LumenConfig.textureLodDivisor, LumenConfig.textureLodDistance);
-        LumenProfiler.log().info("[Lumen] 激进剔除: {}  树叶遮挡: {}",
-                LumenConfig.aggressiveCulling, LumenConfig.cullLeavesOcclusion);
-        LumenProfiler.log().info("[Lumen] 区块构建模式: {}（等待预算 {}ms）线程 {}",
-                LumenConfig.chunkBuildMode, top.fpvp.lumen.thread.ChunkThreadTuning.waitBudgetMs(),
-                top.fpvp.lumen.thread.ChunkThreadTuning.workerCount());
-        LumenProfiler.log().info("[Lumen] 声音: 声道 {}（原版 28） 限流={} {} 个/tick",
-                LumenConfig.moreSoundChannels ? LumenConfig.soundChannels : 28,
-                LumenConfig.soundThrottle, LumenConfig.soundSubmissionsPerTick);
-        LumenProfiler.log().info("[Lumen] 碰撞优化: {}  物品模型缓存: {}",
-                LumenConfig.collisionOptimization, LumenConfig.itemRenderCache);
-        LumenProfiler.log().info("[Lumen] 实体渲染范围: mob={} item={} player={} other={}（0=不限制）",
-                LumenConfig.entityRangeMob, LumenConfig.entityRangeItem,
-                LumenConfig.entityRangePlayer, LumenConfig.entityRangeOther);
-        LumenProfiler.log().info("[Lumen] 背面剔除: 实体={} 方块={}  检测到 OptiFine={}",
-                LumenConfig.entityBackFaceCulling, LumenConfig.blockBackFaceCulling,
-                top.fpvp.lumen.render.BackFaceCulling.isOptifinePresent());
-        LumenProfiler.log().info("[Lumen] 网络: 跳过冗余位置包={}（1.8.9 的 IO/编码本来就在 Netty 线程上）",
-                LumenConfig.skipRedundantPackets);
-        LumenProfiler.log().info("[Lumen] 像素合并={}（1.8.9 不可用） ASM 改写={}",
-                LumenConfig.pixelMerge, LumenConfig.asmOptimizations);
 
         // 客户端专用的异步执行器在这里显式初始化，避免在类加载期做任何
         // 与线程/GL 相关的动作 —— 1.8.9 的类加载顺序并不保证渲染上下文已就绪。
         AsyncTaskDispatcher.initialize();
     }
 
-    /** 把线程配置翻译成人能看懂的一行，避免日志里出现裸的 -1。 */
-    private static String describeBuilderThreads() {
+    /**
+     * 把线程配置翻译成人能看懂的一行。
+     *
+     * <p>原本只用于启动日志。日志移除后改由配置界面调用 ——
+     * 配置项里写的是 {@code -1}，玩家需要知道那实际会开出几个线程，
+     * 否则"自适应"等于一个不可验证的黑箱。
+     */
+    public static String describeBuilderThreads() {
         int configured = LumenConfig.chunkBuilderThreads;
         if (configured == 0) {
             return "原版(" + ChunkThreadTuning.VANILLA_WORKERS + ")，已强制";
@@ -142,7 +102,7 @@ public final class Lumen {
         if (configured > 0) {
             return configured + "（手动指定，核数上限 " + ChunkThreadTuning.cores() + "）";
         }
-        // 自适应：直接打印公式算出的结果，方便玩家确认是否按预期生效。
+        // 自适应：直接算出公式结果，方便玩家确认是否按预期生效。
         long maxMemory = Runtime.getRuntime().maxMemory();
         return "自适应 -> " + ChunkThreadTuning.workerCount() + " 个 worker / "
                 + ChunkThreadTuning.builderCount() + " 个构建器"

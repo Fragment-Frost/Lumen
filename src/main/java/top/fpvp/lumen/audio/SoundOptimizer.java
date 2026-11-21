@@ -113,42 +113,22 @@ public final class SoundOptimizer {
         try {
             Class<?> cfg = Class.forName("paulscode.sound.SoundSystemConfig");
             java.lang.reflect.Method setter = cfg.getMethod("setNumberNormalChannels", int.class);
-            int before = readChannelCount(cfg);
             setter.invoke(null, target);
-            int after = readChannelCount(cfg);
             channelCountApplied = true;
-            LumenProfiler.log().info("[Lumen] 声音声道数: {} -> {}（原版 {} 是多声音丢失的根因）",
-                    before, after, VANILLA_NORMAL_CHANNELS);
+            // 日志已移除。声道数是否真的改成功，可以用
+            // SoundOptimizer.describe() 读出来。
             return true;
         } catch (Throwable t) {
             // 声音库尚未加载时类可能还不可用：这不是错误，
             // 下一次调用（loadSoundSystem 之前）会再试。
-            LumenProfiler.log().debug("[Lumen] 声道数设置推迟: {}", t.toString());
             return false;
         }
-    }
-
-    private static int readChannelCount(Class<?> cfg) {
-        try {
-            java.lang.reflect.Method getter = cfg.getMethod("getNumberNormalChannels");
-            Object v = getter.invoke(null);
-            if (v instanceof Integer) {
-                return (Integer) v;
-            }
-        } catch (Throwable ignored) {
-            // 读不到就算了，返回原值占位。
-        }
-        return VANILLA_NORMAL_CHANNELS;
     }
 
     /** 每 tick 重置限流计数。 */
     public static void beginTick() {
         submittedThisTick = 0;
-        if (TICK_KEYS.size() > 512) {
-            TICK_KEYS.clear();
-        } else {
-            TICK_KEYS.clear();
-        }
+        TICK_KEYS.clear();
     }
 
     /**

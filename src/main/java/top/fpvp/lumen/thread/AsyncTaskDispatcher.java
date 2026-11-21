@@ -90,7 +90,6 @@ public final class AsyncTaskDispatcher {
             t.setPriority(Thread.NORM_PRIORITY - 1);
             t.start();
         }
-        LumenProfiler.log().info("[Lumen] 异步调度器已启动：{} 个 worker，队列容量 {}", workers, queueCapacity);
     }
 
     public static void initialize() {
@@ -141,8 +140,7 @@ public final class AsyncTaskDispatcher {
      * 然后把结果丢掉，是更安全也更简单的选择。
      */
     public void bumpGeneration() {
-        int now = generation.incrementAndGet();
-        LumenProfiler.log().debug("[Lumen] 世界代次 -> {}", now);
+        generation.incrementAndGet();
     }
 
     /**
@@ -198,8 +196,12 @@ public final class AsyncTaskDispatcher {
 
             if (c.error != null) {
                 failed.incrementAndGet();
-                // 后台任务的异常绝不能静默吞掉：它会表现成“某个功能莫名不工作”。
-                LumenProfiler.log().error("[Lumen] 异步任务 #" + c.task.sequence + " 执行失败", c.error);
+                // 后台任务的异常绝不能静默吞掉：它会表现成"某个功能莫名不工作"。
+                //
+                // 日志已移除，所以改为计数。这个计数会在 F3 调试行的
+                // Err 段里显示出来 —— 那是不看日志之后唯一能发现
+                // "有东西在偷偷失败"的地方。
+                LumenProfiler.asyncTaskErrors++;
                 safeDiscard(c.task, AsyncTask.DiscardReason.ERROR);
                 continue;
             }
@@ -226,7 +228,12 @@ public final class AsyncTaskDispatcher {
                 task.deliver(result);
             }
         } catch (Throwable t) {
-            LumenProfiler.log().error("[Lumen] 交付异步结果时抛异常（已隔离，不影响主线程）", t);
+            // 隔离交付期间的异常，绝不让它冒到主线程。
+            //
+            // 日志已移除，改为计数（见 LumenProfiler.asyncDeliverErrors）。
+            // 保留 try/catch 本身是必须的：任务实现（寻路、剔除结果处理）
+            // 里的任何 bug 都不该让整个 tick 崩掉。
+            LumenProfiler.asyncDeliverErrors++;
         }
     }
 
@@ -234,7 +241,8 @@ public final class AsyncTaskDispatcher {
         try {
             task.onDiscard(reason);
         } catch (Throwable t) {
-            LumenProfiler.log().error("[Lumen] 丢弃异步任务时抛异常（已隔离）", t);
+            // 同上：onDiscard 常用来清理资源/释放标志，出错不该影响主线程。
+            LumenProfiler.asyncDiscardErrors++;
         }
     }
 
@@ -334,10 +342,9 @@ public final class AsyncTaskDispatcher {
                     timedOut.incrementAndGet();
                     // 超预算通常意味着某次计算退化（例如寻路目标不可达导致的全图搜索）。
                     // 记录但不惩罚：惩罚会让系统在负载高时拒绝干活，反而更慢。
-                    if (LumenConfig.verboseDebug) {
-                        LumenProfiler.log().warn("[Lumen] 异步任务 #{} 耗时 {} ms，超出预算 {} ms",
-                                task.sequence, elapsed / 1_000_000L, LumenConfig.asyncTaskBudgetMs);
-                    }
+                    //
+                    // 日志已移除，所以这里不再输出具体耗时；
+                    // timedOut 计数可以从 dispatcher 自身的统计里读到。
                 }
                 task.startedAtNanos = 0L;
             }

@@ -160,7 +160,9 @@ public final class TextureLod {
             LOD_TEXTURES.put(location, newId);
             return newId;
         } catch (Throwable t) {
-            LumenProfiler.log().debug("[Lumen] 纹理降采样失败，回退原纹理: {}", t.toString());
+            // 失败是正常路径（纹理未加载、尺寸不合适、GL 上下文异常），
+            // 一律静默回退原纹理 —— 画面正确性优先于这点带宽。
+            LumenProfiler.textureLodFailures++;
             return -1;
         }
     }

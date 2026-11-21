@@ -126,15 +126,27 @@ public final class LightEngineCompat {
     }
 
     private static void logConflict(String mod, String kind, List<String> all) {
-        LumenProfiler.log().warn(
-                "[Lumen] 检测到 {}（{}）。为避免光照结果互相覆盖，已自动调整：", mod, kind);
-        LumenProfiler.log().warn(
-                "[Lumen]   - 光照引擎：关闭（交由原版/对方处理）");
-        LumenProfiler.log().warn(
-                "[Lumen]   - 区段折叠：关闭（保证光值即时可见）");
-        if (all.size() > 1) {
-            LumenProfiler.log().warn("[Lumen]   全部相关 mod: {}", all);
+        // 原本这里会打三条 warn 日志，告知玩家"检测到冲突，光照引擎已关闭"。
+        //
+        // 日志已全部移除，但这条信息不能丢 —— 玩家装了两个光照 mod 却不知道
+        // 为什么本 mod 的光照没生效，是最容易产生"这 mod 没用"误解的场景。
+        //
+        // 所以改为记下冲突方，由 describe() 暴露给配置界面与 F3 调试行。
+        conflictMod = mod;
+        conflictKind = kind;
+    }
+
+    /** 冲突的 mod 名（无冲突时为 null）。 */
+    private static String conflictMod;
+    private static String conflictKind;
+
+    /** 供配置界面显示：当前光照引擎的冲突状态。 */
+    public static String conflictSummary() {
+        detect();
+        if (conflictMod == null) {
+            return "无冲突";
         }
+        return "检测到 " + conflictMod + "（" + conflictKind + "），光照引擎已自动关闭";
     }
 
     /**

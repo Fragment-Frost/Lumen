@@ -383,11 +383,36 @@ val entityRangeSelfTest by tasks.registering(JavaExec::class) {
     dependsOn(tasks.named("testClasses"))
 }
 
+/**
+ * 哈希与坐标查表的实证测试。
+ *
+ * <p>这个测试的价值不在"验证我们的哈希更快"——它反而记录了
+ * <b>原版哈希更均匀</b>这个实测结论，以及为什么仍然保留 LongKeyMap
+ * （省装箱、省 BlockPos 对象，与哈希质量无关）。
+ *
+ * <p>真正守住的是开放寻址表的正确性：删除后探测链不能断裂、
+ * 扩容后所有键仍可命中。这两处写错会表现为"偶发查不到"，极难复现。
+ */
+val fastHashSelfTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Validates LongKeyMap semantics and records the measured hash-distribution comparison."
+
+    classpath = files(
+        layout.buildDirectory.dir("classes/java/main"),
+        layout.buildDirectory.dir("classes/java/test"),
+        mainCompileClasspath
+    )
+
+    mainClass.set("top.fpvp.lumen.verify.FastHashSelfTest")
+    dependsOn(tasks.named("testClasses"))
+}
+
 tasks.named("check") {
     dependsOn(verifyMixinTargets, dispatcherSelfTest, chunkTuningSelfTest,
             chunkBuildModeSelfTest,
             lightEngineSelfTest, lightEngineSemanticsSelfTest,
-            mixinGatingSelfTest, configGuiSelfTest, entityRangeSelfTest)
+            mixinGatingSelfTest, configGuiSelfTest, entityRangeSelfTest,
+            fastHashSelfTest)
 }
 
 // 运行配置：1.8.9 的 launchwrapper 依赖 URLClassLoader（Java 9 起被移除），

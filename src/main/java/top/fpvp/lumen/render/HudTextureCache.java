@@ -193,7 +193,11 @@ public final class HudTextureCache {
             if (OpenGlHelper.glCheckFramebufferStatus(OpenGlHelper.GL_FRAMEBUFFER)
                     != OpenGlHelper.GL_FRAMEBUFFER_COMPLETE) {
                 GL11.glDeleteTextures(glTexture);
-                LumenProfiler.log().warn("[Lumen] HUD 纹理帧缓冲不完整，已禁用缓存");
+                // 帧缓冲不完整：直接永久关闭这个功能（本会话内不再尝试）。
+                //
+                // 日志已移除。这里的处理本身已经是"自愈"的 ——
+                // 关掉开关后调用方会自动回退到原版绘制，玩家不会看到异常，
+                // 所以不需要额外的可见提示。
                 LumenConfig.hudTextureCache = false;
                 return null;
             }
@@ -242,7 +246,12 @@ public final class HudTextureCache {
 
             return new Entry(location, logicalWidth, logicalHeight);
         } catch (Throwable t) {
-            LumenProfiler.log().warn("[Lumen] HUD 纹理烘焙失败，已回退到原版绘制", t);
+            // 烘焙失败一律回退到原版绘制：HUD 画得慢一点，
+            // 远好过因为一个渲染细节让整个帧崩掉。
+            //
+            // 日志已移除。回退路径本身完整（finally 里已恢复所有 GL 状态），
+            // 玩家看到的就是原版 HUD，不会有异常表现。
+            LumenProfiler.textureLodFailures++;
             return null;
         } finally {
             baking = false;

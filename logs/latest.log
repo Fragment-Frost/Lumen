@@ -1,6 +1,6 @@
-[10:32:38] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 8
-[10:32:38] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 32
-[10:32:38] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 64
-[10:32:38] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 128
-[10:32:38] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 8
-[10:32:38] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 64
+[10:40:31] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 8
+[10:40:32] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 32
+[10:40:32] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 64
+[10:40:32] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 128
+[10:40:32] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 8
+[10:40:32] [main/INFO]: [Lumen] 异步调度器已启动：2 个 worker，队列容量 64

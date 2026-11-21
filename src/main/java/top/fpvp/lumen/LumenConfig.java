@@ -239,12 +239,49 @@ public final class LumenConfig {
 
     // ==== 网络 ====
     /**
+     * 合并 flush：把同一 tick 内的多个包攒起来，一次系统调用发出。
+     *
+     * <p>默认<b>开</b>。理由：原版 {@code dispatchPacket} 用的是
+     * {@code writeAndFlush}，<b>每发一个包就做一次 {@code send()} 系统调用</b>。
+     * 爆炸、区块批量更新、几十个实体同时移动时，一个 tick 有几十上百个包，
+     * 就是几十上百次系统调用 —— 开销不在数据量，而在用户态/内核态切换。
+     *
+     * <p>本项只把 {@code write} 和 {@code flush} 拆开，包的内容、顺序、
+     * 编码时机与线程全都和原版一致，没有任何跨线程或延迟编码。
+     */
+    public static boolean batchFlush = true;
+
+    /**
+     * 合并 flush 的跨度（tick）。1 = 每 tick 刷一次（默认），2~3 = 每两/三 tick。
+     *
+     * <p>1 已经是收益最大且最安全的一档（把"每包一刷"降到"每 tick 一刷"）。
+     * 设更大能进一步合并，但<b>延迟真的会增加</b>：
+     * 高延迟网络下操作反馈变慢，PvP 不可接受。上限 3（50ms）。
+     */
+    public static int flushIntervalTicks = 1;
+
+    /**
+     * 攒够多少个包就立即 flush（不等 tick 边界）。
+     *
+     * <p>防止极端情况下无限积压。0 = 不限制（只靠 tick 边界刷）。
+     */
+    public static int flushBatchSize = 32;
+
+    /**
      * 跳过内容完全相同的每 tick 位置包。
      *
      * <p>默认关：某些带反作弊的服务端依赖连续位置包做移动校验，
      * 跳过可能导致误判。开启时有最大连续跳过数限制。
      */
     public static boolean skipRedundantPackets = false;
+
+    /**
+     * 位置包的最大连续跳过数（tick）。0 = 用内置默认 4。
+     *
+     * <p>这个值决定"最久多久不发一次位置包"。调大能省更多包，
+     * 但服务端的位置校验窗口被撑得更久，误判风险上升。
+     */
+    public static int maxConsecutiveSkip = 0;
 
     // ==== 像素合并 ====
     /**
@@ -391,8 +428,11 @@ public final class LumenConfig {
             loadWorld(cfg);
             loadDebug(cfg);
         } catch (Exception e) {
-            // 配置读失败不应该让游戏起不来：回落到默认值继续，但必须留下痕迹。
-            LumenProfiler.log().error("[Lumen] 读取配置文件失败，本次使用默认值", e);
+            // 配置读失败不应该让游戏起不来：回落到默认值继续。
+            //
+            // 日志已移除，改为计数。这个计数会出现在 F3 调试行的 Err 段里 ——
+            // 没有日志之后，那是唯一能发现"配置其实没读进去"的地方。
+            LumenProfiler.configErrors++;
         } finally {
             if (cfg.hasChanged()) {
                 cfg.save();
@@ -423,11 +463,27 @@ public final class LumenConfig {
                 "每 tick 最多提交多少个声音。0 = 不限制。");
 
         // ---- 网络 ----
+        batchFlush = cfg.getBoolean("batchFlush", CAT_CORE, batchFlush,
+                "合并 flush：把同一 tick 内的多个包攒起来，一次系统调用发出。\n"
+                        + "原版 dispatchPacket 用 writeAndFlush，每发一个包就做一次 send() 系统调用。\n"
+                        + "爆炸/区块批量更新/大量实体移动时，一个 tick 几十上百个包 = 几十上百次系统调用，\n"
+                        + "开销在用户态/内核态切换而非数据量。这就是「网络卡顿感」的一个真实来源。\n"
+                        + "本项只把 write 与 flush 拆开，包的内容、顺序、编码时机和线程全都与原版一致。\n"
+                        + "检测到本地/局域网连接时自动不启用（本地没有系统调用瓶颈，只会增加延迟）。");
+        flushIntervalTicks = cfg.getInt("flushIntervalTicks", CAT_CORE, flushIntervalTicks, 1, 3,
+                "合并 flush 的跨度（tick）。1 = 每 tick 刷一次（推荐），2~3 = 每两/三 tick。\n"
+                        + "1 已经是收益最大且最安全的一档。设更大能进一步合并，\n"
+                        + "但延迟真的会增加：高延迟网络下操作反馈变慢，PvP 不可接受。");
+        flushBatchSize = cfg.getInt("flushBatchSize", CAT_CORE, flushBatchSize, 0, 512,
+                "攒够多少个包就立即 flush（不等 tick 边界），防止极端情况积压。0 = 不限制。");
         skipRedundantPackets = cfg.getBoolean("skipRedundantPackets", CAT_CORE, skipRedundantPackets,
                 "跳过内容完全相同的每 tick 位置包。默认关闭：\n"
                         + "某些带反作弊的服务端依赖连续位置包做移动校验，跳过可能被误判。\n"
                         + "注意：1.8.9 的网络 IO 与编码本来就已在 Netty 线程上，\n"
                         + "不需要也不应该再自己开线程池（会增加延迟并破坏包顺序）。");
+        maxConsecutiveSkip = cfg.getInt("maxConsecutiveSkip", CAT_CORE, maxConsecutiveSkip, 0, 40,
+                "位置包的最大连续跳过数（tick）。0 = 用内置默认 4。\n"
+                        + "调大能省更多包，但服务端的位置校验窗口被撑得更久，误判风险上升。");
 
         // ---- 像素合并（不可用）----
         pixelMerge = cfg.getBoolean("pixelMerge", CAT_RENDER, pixelMerge,

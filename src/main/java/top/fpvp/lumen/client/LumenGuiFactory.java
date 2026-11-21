@@ -102,6 +102,10 @@ public final class LumenGuiFactory implements IModGuiFactory {
                 // 配置尚未加载：返回空列表，界面显示为空但不会崩。
                 return list;
             }
+            // 运行时状态放在最前面：这些信息原本是启动日志的内容，
+            // 日志移除后必须有一个玩家能看见的地方，否则
+            // "光照引擎为什么被关了"这类问题将完全无从得知。
+            list.add(new ConfigElement(buildStatusCategory(cfg)));
             // ConfigElement 包装一个 category，GuiConfig 会把它渲染成一页。
             list.add(new ConfigElement(cfg.getCategory(LumenConfig.CAT_CORE)));
             list.add(new ConfigElement(cfg.getCategory(LumenConfig.CAT_THREADS)));
@@ -110,6 +114,43 @@ public final class LumenGuiFactory implements IModGuiFactory {
             list.add(new ConfigElement(cfg.getCategory(LumenConfig.CAT_WORLD)));
             list.add(new ConfigElement(cfg.getCategory(LumenConfig.CAT_DEBUG)));
             return list;
+        }
+
+        /**
+         * 构造只读的「运行时状态」分类。
+         *
+         * <p>用 {@code getInt}/{@code getBoolean} 的"派生值"不好表达字符串，
+         * 所以这里用 {@code getString} 且把范围限制成单值 ——
+         * 玩家在界面上改不动（改了下一次刷新又会写回运行时值）。
+         *
+         * <p>为什么不用 {@code Property.Type.STRING} 的只读标记：
+         * 1.8.9 的 Forge 没有为 GUI 提供"只读"语义，{@code Property}
+         * 本身也没有 setReadOnly。用"每次打开界面都重新计算并覆盖"
+         * 的方式达到等效效果，副作用是这四项会出现在 config 文件里。
+         * 那可以接受 —— 它们本身就是有用的诊断信息。
+         */
+        private static net.minecraftforge.common.config.ConfigCategory buildStatusCategory(
+                Configuration cfg) {
+            String cat = "status";
+            if (!cfg.hasCategory(cat)) {
+                cfg.getCategory(cat).setLanguageKey("lumen.status");
+            }
+            net.minecraftforge.common.config.ConfigCategory c = cfg.getCategory(cat);
+
+            putStatus(cfg, cat, "lightEngine",
+                    top.fpvp.lumen.lighting.LightEngine.isEnabled()
+                            ? "Starlight 式增量引擎（已启用）" : "原版/批处理");
+            putStatus(cfg, cat, "lightConflict",
+                    top.fpvp.lumen.lighting.LightEngineCompat.conflictSummary());
+            putStatus(cfg, cat, "chunkThreads", Lumen.describeBuilderThreads());
+            putStatus(cfg, cat, "optifine",
+                    top.fpvp.lumen.render.BackFaceCulling.isOptifinePresent()
+                            ? "已检测到（方块背面剔除自动跳过）" : "未检测到");
+            return c;
+        }
+
+        private static void putStatus(Configuration cfg, String cat, String key, String value) {
+            cfg.get(cat, key, value, "运行时状态（只读，每次打开界面刷新）");
         }
 
         @Override

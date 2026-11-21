@@ -227,7 +227,9 @@ public final class SkinLod {
         } catch (Throwable t) {
             // 任何失败都静默回退 —— 皮肤错了是"看得见的 bug"，
             // 崩溃是"不能接受的 bug"，两者代价不对称。
-            LumenProfiler.log().debug("[Lumen] 皮肤 LoD 降采样失败，回退原纹理: {}", t.toString());
+            //
+            // 日志已移除，改为计数（见 LumenProfiler.textureLodFailures）。
+            LumenProfiler.textureLodFailures++;
             return -1;
         }
     }

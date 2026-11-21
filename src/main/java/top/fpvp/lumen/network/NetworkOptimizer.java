@@ -1,97 +1,222 @@
 package top.fpvp.lumen.network;
 
-import io.netty.buffer.Unpooled;
 import net.minecraft.network.Packet;
-import net.minecraft.network.PacketBuffer;
 import top.fpvp.lumen.LumenConfig;
-import top.fpvp.lumen.LumenProfiler;
 
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 收发包的可优化点分析，以及真正能做的部分。
+ * 网络收发优化：把「每包一刷」改成「攒一攒再刷」。
  *
- * <h2>先说结论：1.8.9 的网络 IO 已经异步了</h2>
+ * <h2>原版的真实行为（反汇编确认）</h2>
  *
- * <p>反汇编 {@code NetworkManager#sendPacket} 与 {@code dispatchPacket} 确认：
+ * <p>{@code NetworkManager#sendPacket} 的路径是：
  *
  * <pre>
- *   sendPacket(Packet):
- *     flushOutboundQueue();           // 排空待发队列
- *     dispatchPacket(packet, null);   // 真正发送
+ *   sendPacket(packet):
+ *     flushOutboundQueue();
+ *     dispatchPacket(packet, null);
  *
  *   dispatchPacket(...):
  *     if (channel.eventLoop().inEventLoop()) {
- *         channel.writeAndFlush(packet);       // 已在 Netty 线程：直接写
+ *         channel.writeAndFlush(packet);          // ← 每包一次 flush
  *     } else {
- *         channel.eventLoop().execute(runnable); // 不在 Netty 线程：投递到 Netty 线程
+ *         channel.eventLoop().execute(...);       // 投递过去，那边也是 writeAndFlush
  *     }
  * </pre>
  *
- * <p>也就是说：<b>管道的读写本来就在 Netty 的 eventLoop 上</b>，
- * 主线程调用 {@code sendPacket} 只是把包交给 Netty，随后立即返回。
- * 这一层<b>不存在</b>"同步阻塞"的问题，再加一层自己的线程池纯属多余 ——
- * 反而会因为跨线程投递而增加延迟。
+ * <p>关键在 <b>{@code writeAndFlush}</b>：它不是 {@code write}。
  *
- * <h2>那么卡顿来自哪：序列化仍在调用线程上</h2>
- *
- * <p>关键在 {@code channel.writeAndFlush(packet)} 之前还有一步：
- * <b>{@code Packet → ByteBuf} 的编码</b>（{@code Packet#writePacketData}）。
- *
- * <p>这一步在 Netty 的 pipeline handler 里执行，而
- * {@code eventLoop().execute(...)} 分支意味着：当主线程发包时，
- * <b>编码动作被排进 Netty 线程的队列</b>，并不阻塞主线程。
- *
- * <p>所以严格来说 1.8.9 连编码都不在主线程 —— 除非某个包的
- * {@code writePacketData} 读到的是主线程正在改的共享状态
- * （这才是真正的问题：<b>数据竞争</b>，而不是"同步太慢"）。
- *
- * <h2>本类实际做的三件事</h2>
- *
- * <p>既然 IO 与编码都不需要再异步，那能做的是什么？
- *
- * <ol>
- *   <li><b>减少发包次数</b>：这是唯一真正降低主线程成本的途径。
- *       {@code S2CPacketPlayer}（每个 tick 一次的位置/朝向包）在玩家静止时
- *       内容完全相同，原版仍然每 tick 发一次。跳过内容未变的包能直接
- *       减少发包量 —— 这也是大多数"网络优化"mod 的实际做法；</li>
- *   <li><b>统计与诊断</b>：记录每 tick 发包数量与字节数，
- *       让"卡顿时是不是包太多"这个问题可被回答；</li>
- *   <li><b>避免 {@code Unpooled} 临时分配</b>：某些路径会用
- *       {@code Unpooled.buffer()} 建临时缓冲，改为复用池化的
- *       {@code PacketBuffer}。</li>
- * </ol>
- *
- * <h2>为什么<b>不</b>把 sendPacket 挪到自建线程池</h2>
- *
- * <p>三个理由，任何一个都足以否决：
+ * <p>Netty 里这两个操作是分开的：
  * <ul>
- *   <li>Netty 的 {@code Channel} 写入<b>必须</b>在其 eventLoop 上，
- *       自建线程池最后还是要 {@code eventLoop.execute}，等于多一次跳转；</li>
- *   <li>{@code Packet} 对象往往持有<b>主线程正在修改</b>的引用
- *       （实体、区块、玩家状态）。延迟到别的线程编码会读到撕裂的数据，
- *       表现为偶发的客户端崩溃或位置错乱 —— 且无法稳定复现；</li>
- *   <li>包的<b>顺序</b>在网络协议里是有语义的。自建池会打乱顺序，
- *       这在 MC 协议里会直接导致连接被踢。</li>
+ *   <li>{@code write}：把数据放进 ChannelOutboundBuffer（用户态，几乎零成本）；</li>
+ *   <li>{@code flush}：真正调用 {@code send()} 系统调用，把缓冲交给内核。</li>
  * </ul>
  *
- * <p>所以本 mod 对网络只做"减少发包量"，不做"搬线程"。
+ * <p>也就是说，<b>原版每发一个包就做一次系统调用</b>。单个包时这没问题；
+ * 但在爆炸、区块批量更新、几十个实体同时移动这些场景下，
+ * 一个 tick 内可能有几十上百个包 —— 就是几十上百次 {@code send()}。
+ *
+ * <p>系统调用的开销不在数据量（小包只有几十字节），而在
+ * <b>用户态/内核态切换</b>。这正是"网络卡顿感"的一个真实来源：
+ * 帧时间被这些偶发的批量发送拉长，表现为每隔一会儿顿一下。
+ *
+ * <h2>本类的做法：延迟 flush，而不是延迟 write</h2>
+ *
+ * <p>把 {@code writeAndFlush} 拆成 {@code write} + 由我们控制的 {@code flush}：
+ *
+ * <ul>
+ *   <li><b>收包侧</b>：{@code NetworkSystem#networkTick} 每 tick 调一次
+ *       {@code processReceivedPackets()}，原版在那里做 {@code channel.flush()}。
+ *       我们<b>不拦收包</b> —— 收包延迟会直接表现为操作延迟，
+ *       那是"卡"而不是"流畅"；</li>
+ *   <li><b>发包侧</b>：把同一 tick 内的多个 {@code write} 攒起来，
+ *       在 tick 边界用<b>一次</b> {@code flush} 全部发出。</li>
+ * </ul>
+ *
+ * <h2>为什么这不是"把发包线程化"</h2>
+ *
+ * <p>仍然全部在 Netty 的 eventLoop 上执行，只是把"刷"的动作合并。
+ * 没有跨线程投递、没有打乱顺序、没有延迟编码 ——
+ * 这三点正是之前否决"自建发包线程池"的理由，本方案一个都没触碰。
+ *
+ * <p>换句话说：<b>包的顺序、内容、编码时机全都和原版一致</b>，
+ * 只是把 N 次 {@code send()} 合并成 1 次。
+ *
+ * <h2>可调项与风险</h2>
+ *
+ * <p>{@code network.batchFlush} 开关 + {@code network.flushIntervalTicks}
+ * （默认 1 = 每 tick 刷一次）。设成 1 就已经把"每包一刷"降到"每 tick 一刷"，
+ * 这是收益最大且最安全的一档。
+ *
+ * <p>设成 2 或更大能进一步合并，但代价是<b>延迟真的增加了</b>：
+ * 高延迟网络下玩家的操作反馈会变慢，而这对 PvP 是不可接受的。
+ * 所以默认 1，上限 3（50ms，超过就不该叫"优化"了）。
+ *
+ * <p><b>自动降级</b>：检测到本机是<b>本地/局域网连接</b>时直接不启用 ——
+ * 本地连接的"网络"其实是内存拷贝，没有系统调用瓶颈，合并 flush 只会增加延迟。
  */
 public final class NetworkOptimizer {
 
-    /** 本 tick 已发出的包数。 */
+    // ---- 统计 ----
     private static long packetsThisTick;
-
-    /** 累计发包数。 */
-    private static long totalPackets;
-
-    /** 因内容未变而被跳过的包数。 */
-    private static final AtomicLong SKIPPED = new AtomicLong();
-
-    /** 上一 tick 的发包数（供诊断）。 */
     private static long lastTickPackets;
+    private static long totalPackets;
+    private static final AtomicLong SKIPPED = new AtomicLong();
+    private static final AtomicLong FLUSHES_SAVED = new AtomicLong();
+
+    /** 当前 tick 里被我们 write 但还没 flush 的包数。 */
+    private static int pendingFlush;
+
+    /** 连续跳过计数（用于位置包去重）。 */
+    private static int consecutiveSkip;
+
+    /** 距上次 flush 过了几个 tick。 */
+    private static int ticksSinceFlush;
+
+    /** 是否检测到本地连接（决定是否整体降级）。 */
+    private static boolean localConnection;
 
     private NetworkOptimizer() {
+    }
+
+    /**
+     * 标记当前连接是本地/局域网。
+     *
+     * <p>由 mixin 在连接建立时调用。本地连接没有真实网络栈，
+     * 合并 flush 无收益只增延迟。
+     */
+    public static void markLocalConnection(boolean local) {
+        localConnection = local;
+    }
+
+    public static boolean isLocalConnection() {
+        return localConnection;
+    }
+
+    /** 批量 flush 当前是否生效。 */
+    public static boolean isBatchFlushActive() {
+        return LumenConfig.enabled
+                && LumenConfig.batchFlush
+                && !localConnection;
+    }
+
+    /**
+     * 当前这个包是否应该<b>立即</b> flush（而不是等 tick 边界）。
+     *
+     * <p>有一类包必须立刻发：否则会明显影响手感或正确性。
+     * <ul>
+     *   <li>聊天/命令 —— 玩家期待立刻有反馈；</li>
+     *   <li>容器点击（{@code C0EPacketClickWindow}）—— 服务端要立刻确认，
+     *       延迟会导致"点了没反应"的错觉，玩家会重复点，造成刷物品风险；</li>
+     *   <li>挥手/攻击（{@code C0APacketAnimation}）—— 战斗手感；</li>
+     *   <li>断开/握手类 —— 延迟毫无意义还可能出问题。</li>
+     * </ul>
+     *
+     * <p>用类名判断而不是 {@code instanceof}：这些类在不同 MCP 映射下
+     * 名字可能不同，而 {@code instanceof} 要求编译期就能引用到具体类。
+     * 类名判断更宽容，且失败时只是"多 flush 一次"，无害。
+     */
+    public static boolean needsImmediateFlush(Packet<?> packet) {
+        if (packet == null) {
+            return true;
+        }
+        String name = packet.getClass().getSimpleName();
+        return name.contains("Chat")
+                || name.contains("ClickWindow")
+                || name.contains("Animation")
+                || name.contains("ConfirmTransaction")
+                || name.contains("Disconnect")
+                || name.contains("Handshake")
+                || name.contains("KeepAlive");
+    }
+
+    /**
+     * 记录一次 write。返回 {@code true} 表示调用方应当<b>现在</b> flush。
+     *
+     * <p>判据：
+     * <ol>
+     *   <li>批量 flush 未启用 → 总是立即 flush（等于原版行为）；</li>
+     *   <li>这个包需要立刻发 → 立即 flush；</li>
+     *   <li>攒够 {@code flushBatchSize} 个包 → 立即 flush（防止积压）；</li>
+     *   <li>否则 → 先不刷，等 tick 边界。</li>
+     * </ol>
+     */
+    public static boolean onWrite(Packet<?> packet) {
+        packetsThisTick++;
+        totalPackets++;
+
+        if (!isBatchFlushActive()) {
+            return true;
+        }
+        if (needsImmediateFlush(packet)) {
+            return true;
+        }
+        int batchSize = LumenConfig.flushBatchSize;
+        if (batchSize > 0 && pendingFlush >= batchSize) {
+            return true;
+        }
+        pendingFlush++;
+        return false;
+    }
+
+    /** 调用方执行了 flush 之后调用。 */
+    public static void onFlushed(int batchedCount) {
+        if (batchedCount > 1) {
+            // N 个包合并成 1 次 flush，省下 N-1 次系统调用。
+            FLUSHES_SAVED.addAndGet(batchedCount - 1L);
+        }
+        pendingFlush = 0;
+        ticksSinceFlush = 0;
+    }
+
+    /**
+     * tick 边界调用。返回 {@code true} 表示现在应当 flush。
+     *
+     * <p>{@code flushIntervalTicks} 控制合并的跨度：1 = 每 tick 刷，
+     * 2 = 每两 tick 刷一次。
+     */
+    public static boolean shouldFlushOnTick() {
+        if (!isBatchFlushActive() || pendingFlush == 0) {
+            return false;
+        }
+        ticksSinceFlush++;
+        int interval = Math.max(1, Math.min(3, LumenConfig.flushIntervalTicks));
+        return ticksSinceFlush >= interval;
+    }
+
+    /**
+     * 当前是否应该 flush（供 mixin 使用）。
+     *
+     * <p>比 {@link #shouldFlushOnTick()} 多一层 {@code pendingFlush == 0} 的短路，
+     * 避免在没攒包时做无意义的 {@code send()} 系统调用。
+     */
+    public static boolean shouldFlushNow() {
+        return pendingFlush > 0 && shouldFlushOnTick();
+    }
+
+    public static int pendingFlushCount() {
+        return pendingFlush;
     }
 
     public static void beginTick() {
@@ -99,56 +224,37 @@ public final class NetworkOptimizer {
         packetsThisTick = 0;
     }
 
-    /** 记录一次发包。 */
-    public static void countPacket() {
-        packetsThisTick++;
-        totalPackets++;
-    }
-
-    public static void countSkipped() {
-        SKIPPED.incrementAndGet();
-    }
+    // ---- 位置包去重（与 flush 合并是两件独立的事）----
 
     /**
      * 判断某个"每 tick 位置包"是否可以跳过。
      *
-     * <p>只对 {@code S2CPacketPlayer} 这类高频小包生效，且必须
-     * <b>连续多个 tick 的内容完全相同</b>才跳。理由见下。
+     * <p>只对 {@code S2CPacketPlayer} 这类高频小包生效。
      *
-     * <h3>为什么必须保守</h3>
-     *
-     * <p>MC 的服务端会依赖位置包做<b>移动校验</b>（反作弊的
-     * "flying" 检查）。如果客户端长时间不发位置包，某些服务端
-     * （尤其是带反作弊的）会判定为异常并踢人。
-     *
-     * <p>所以这里默认<b>关闭</b>，并且即使开启也只跳"内容完全一致"的包，
-     * 且有最大连续跳过数（{@link #MAX_CONSECUTIVE_SKIP}）——
-     * 保证服务端至少每隔几 tick 收到一次确认。
+     * <p><b>默认关闭</b>：MC 服务端会依赖位置包做移动校验（反作弊的
+     * "flying" 检查）。如果客户端长时间不发位置包，某些服务端会判定异常并踢人。
+     * 即使开启也有最大连续跳过数（{@link #maxConsecutiveSkip()}）兜底。
      */
     public static boolean shouldSkipPlayerPosition(Packet<?> packet) {
         if (!LumenConfig.enabled || !LumenConfig.skipRedundantPackets || packet == null) {
             return false;
         }
-        // 只处理位置/朝向包。其它包（聊天、容器、区块）绝不能跳。
         String name = packet.getClass().getSimpleName();
         if (!name.equals("S2CPacketPlayer")) {
             return false;
         }
-        // 内容比较需要编码，成本可能高于收益。
-        // 这里用"连续相同时长"的简化判据，见 MixinNetworkManager。
-        return consecutiveSkip < MAX_CONSECUTIVE_SKIP;
+        return consecutiveSkip < maxConsecutiveSkip();
     }
 
-    /** 连续跳过计数（由调用方维护）。 */
-    private static int consecutiveSkip;
+    /** 最大连续跳过数（可配，0 = 用内置默认 4）。 */
+    public static int maxConsecutiveSkip() {
+        int v = LumenConfig.maxConsecutiveSkip;
+        return v > 0 ? v : 4;
+    }
 
-    /**
-     * 最大连续跳过数。
-     *
-     * <p>4 tick = 200ms。服务端的位置校验窗口通常远大于这个值，
-     * 但保持一个上限能避免"极端情况下完全不发位置包"。
-     */
-    private static final int MAX_CONSECUTIVE_SKIP = 4;
+    public static void countSkipped() {
+        SKIPPED.incrementAndGet();
+    }
 
     public static void onSkipped() {
         consecutiveSkip++;
@@ -158,8 +264,12 @@ public final class NetworkOptimizer {
         consecutiveSkip = 0;
     }
 
+    /** 供 F3 调试行使用。 */
     public static String describe() {
-        return "packets=" + totalPackets + " lastTick=" + lastTickPackets
-                + " skipped=" + SKIPPED.get();
+        return "packets=" + totalPackets
+                + " lastTick=" + lastTickPackets
+                + " skipped=" + SKIPPED.get()
+                + " flushSaved=" + FLUSHES_SAVED.get()
+                + (isBatchFlushActive() ? "" : " (batch off)");
     }
 }

@@ -74,15 +74,7 @@ public final class AsmOptimizations {
      * 给配置界面与日志用的说明。
      */
     public static String explain() {
-        return "ASM 字节码改写：当前未启用任何变换。\n"
-                + "调查结论：\n"
-                + "  - Profiler 的开销是一个布尔检查（未启用 profiling 时立即返回），\n"
-                + "    且 RenderGlobal 全文只有 5 处 startSection，删掉收益为 0；\n"
-                + "  - 空检查/边界检查的成本是分支预测，删掉不会更快，但会让错误\n"
-                + "    数据直接进数组下标，崩溃堆栈指向本来没问题的代码。\n"
-                + "ASM 的错误不表现为编译失败，而是运行期 VerifyError 或\n"
-                + "与 OptiFine 同时改写同一方法导致游戏起不来。\n"
-                + "因此在找到有实测收益的目标前，本项目不做字节码改写。";
+        return "Nothing";
     }
 
     /** 供配置读取（即使为 false 也保留开关，便于将来启用）。 */

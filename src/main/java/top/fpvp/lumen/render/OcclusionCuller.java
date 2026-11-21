@@ -42,8 +42,20 @@ import top.fpvp.lumen.LumenProfiler;
  */
 public final class OcclusionCuller {
 
-    /** 每条射线沿线段采样的点数（不含两端）。与射线长度无关的固定成本。 */
-    private static final int SAMPLES = 6;
+    /**
+     * 每条射线沿线段采样的点数（不含两端）。
+     *
+     * <p>采样数直接决定"漏判"的概率：太少会漏掉薄墙或斜角遮挡，
+     * 表现为"物体明明被挡住却还在画"；太多则每次射线要做更多方块查询。
+     *
+     * <p>改成运行期可读配置（{@code culling.occlusionSamples}），
+     * 因为最优值取决于玩家场景：密集建筑里需要更多采样，
+     * 开阔地带少采样更划算。
+     */
+    private static int samples() {
+        int v = LumenConfig.occlusionSamples;
+        return v > 0 ? v : 6;
+    }
 
     /** 迟滞表容量，必须是 2 的幂。用 entityId 直接寻址，零分配、无哈希。 */
     private static final int TABLE_SIZE = 4096;
@@ -301,8 +313,9 @@ public final class OcclusionCuller {
         }
 
         // 跳过两端：起点可能在摄像机所在方块内，终点就是目标本身。
-        for (int i = 1; i <= SAMPLES; i++) {
-            double t = (double) i / (SAMPLES + 1);
+        int n = samples();
+        for (int i = 1; i <= n; i++) {
+            double t = (double) i / (n + 1);
             if (isOpaqueAt(eyeX + dx * t, eyeY + dy * t, eyeZ + dz * t)) {
                 return true;
             }

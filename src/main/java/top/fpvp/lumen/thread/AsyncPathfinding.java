@@ -210,9 +210,9 @@ public final class AsyncPathfinding {
             // 被丢弃说明这次寻路没生效。清掉冷却记录，让实体能立刻重新请求，
             // 否则它会“卡在冷却里但从未真正寻路”，表现为站着不动。
             LAST_REQUEST.remove(entity.getEntityId());
-            if (reason == DiscardReason.ERROR) {
-                LumenProfiler.log().debug("[Lumen] 寻路任务被丢弃: {}", reason);
-            }
+            // 原本 ERROR 时会打一行 debug 日志，现已移除。
+            // 错误本身由 AsyncTaskDispatcher 统一计数
+            // （LumenProfiler.asyncTaskErrors），这里不需要重复统计。
         }
     }
 }

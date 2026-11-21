@@ -66,9 +66,6 @@ public final class BackFaceCulling {
     /** 是否检测到 OptiFine（启动时探测一次）。 */
     private static final boolean OPTIFINE_PRESENT = detectOptifine();
 
-    /** 是否已把降级原因打进日志（只打一次，避免刷屏）。 */
-    private static boolean loggedOnce;
-
     private BackFaceCulling() {
     }
 
@@ -121,17 +118,12 @@ public final class BackFaceCulling {
         if (!LumenConfig.enabled || !LumenConfig.blockBackFaceCulling) {
             return false;
         }
-        if (OPTIFINE_PRESENT) {
-            if (!loggedOnce) {
-                loggedOnce = true;
-                top.fpvp.lumen.LumenProfiler.log().info(
-                        "[Lumen] 检测到 OptiFine：方块背面剔除自动跳过"
-                                + "（OptiFine 的区域渲染可能依赖双面渲染）。"
-                                + "实体背面剔除不受影响。");
-            }
-            return false;
-        }
-        return true;
+        // 检测到 OptiFine 时跳过。
+        //
+        // 原本这里会打一行日志说明降级原因；日志已移除。
+        // 现在这个状态通过 BackFaceCulling.isOptifinePresent()
+        // 暴露给配置界面，玩家在配置里能看到"检测到 OptiFine"。
+        return !OPTIFINE_PRESENT;
     }
 
     public static String describe() {
