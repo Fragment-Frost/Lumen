@@ -25,8 +25,17 @@ public final class LumenConfig {
     public static boolean enableLightBatching = true;
 
     // ---- 线程 ----
-    /** 区块网格构建线程数；0 = 保持原版（2 个 builder 线程）。 */
-    public static int chunkBuilderThreads = 0;
+    /**
+     * 区块网格构建线程数。
+     *
+     * <p>{@code -1}（默认）= 自适应，按 CPU 核数与堆内存自动推算。
+     * {@code 0} = 强制使用原版值（2 个）。正数 = 强制使用该值。
+     *
+     * <p>自适应公式源自对 Lunar Client 的实测反汇编（见
+     * {@code MixinChunkRenderDispatcher} 的注释），在高核数机器上能把
+     * 2 个构建线程提升到接近核心数的水平，这是跑图时区块加载卡顿的主要解法。
+     */
+    public static int chunkBuilderThreads = -1;
     /** 异步任务队列容量上限，满了直接丢弃（而不是阻塞主线程）。 */
     public static int asyncQueueCapacity = 512;
     /** 单个异步任务允许执行的最长时间，超时会被记录并中止。 */
@@ -96,10 +105,16 @@ public final class LumenConfig {
     }
 
     private static void loadThreads(Configuration cfg) {
-        chunkBuilderThreads = cfg.getInt("chunkBuilderThreads", CAT_THREADS, chunkBuilderThreads, 0, 16,
-                "区块网格构建线程数。0 = 使用原版的 2 个线程。\n"
-                        + "经验值：与物理核心数相当（例如 8 核填 6）。填得太高会让线程互相抢 L3 缓存与 GC 线程，"
-                        + "反而掉帧——这就是“线程开太多”的典型反效果。");
+        chunkBuilderThreads = cfg.getInt("chunkBuilderThreads", CAT_THREADS, chunkBuilderThreads, -1, 32,
+                "区块网格构建线程数。\n"
+                        + "  -1 = 自适应（默认）：按 CPU 核数与堆内存自动推算，"
+                        + "公式为 max(1, min(核心数-2, 内存预算/5))，"
+                        + "其中内存预算 = max(1, 堆上限*0.3/10MB)。"
+                        + "8 核 8G 大致得到 6 个线程，12 核 8G 大约 10 个。\n"
+                        + "   0 = 强制使用原版的 2 个线程。\n"
+                        + "  正数 = 强制使用该值（会被 CPU 核数封顶）。\n"
+                        + "注意：线程数只会影响“区块网格构建”（把方块转成顶点），"
+                        + "不影响区块数据加载——后者在原版里是单线程的。");
         asyncQueueCapacity = cfg.getInt("asyncQueueCapacity", CAT_THREADS, asyncQueueCapacity, 16, 8192,
                 "异步任务队列容量上限。队列满时任务被直接丢弃而不是阻塞主线程——"
                         + "阻塞主线程才是真正的死锁来源。");

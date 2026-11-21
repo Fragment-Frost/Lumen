@@ -7,6 +7,7 @@ import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import top.fpvp.lumen.thread.AsyncTaskDispatcher;
+import top.fpvp.lumen.thread.ChunkThreadTuning;
 
 /**
  * Lumen —— 面向 Minecraft 1.8.9 的客户端性能优化集合。
@@ -52,8 +53,7 @@ public final class Lumen {
         }
 
         LumenProfiler.log().info("[Lumen] 光照批处理: {}", LumenConfig.enableLightBatching);
-        LumenProfiler.log().info("[Lumen] 区块构建线程: {}",
-                LumenConfig.chunkBuilderThreads == 0 ? "原版(2)" : LumenConfig.chunkBuilderThreads);
+        LumenProfiler.log().info("[Lumen] 区块构建线程: {}", describeBuilderThreads());
         LumenProfiler.log().info("[Lumen] 异步寻路: {}", LumenConfig.asyncPathfinding);
         LumenProfiler.log().info("[Lumen] 剔除: TESR={} Entity={} Particle={}",
                 LumenConfig.tileEntityCulling, LumenConfig.entityOcclusionCulling, LumenConfig.particleCulling);
@@ -61,5 +61,23 @@ public final class Lumen {
         // 客户端专用的异步执行器在这里显式初始化，避免在类加载期做任何
         // 与线程/GL 相关的动作 —— 1.8.9 的类加载顺序并不保证渲染上下文已就绪。
         AsyncTaskDispatcher.initialize();
+    }
+
+    /** 把线程配置翻译成人能看懂的一行，避免日志里出现裸的 -1。 */
+    private static String describeBuilderThreads() {
+        int configured = LumenConfig.chunkBuilderThreads;
+        if (configured == 0) {
+            return "原版(" + ChunkThreadTuning.VANILLA_WORKERS + ")，已强制";
+        }
+        if (configured > 0) {
+            return configured + "（手动指定，核数上限 " + ChunkThreadTuning.cores() + "）";
+        }
+        // 自适应：直接打印公式算出的结果，方便玩家确认是否按预期生效。
+        long maxMemory = Runtime.getRuntime().maxMemory();
+        return "自适应 -> " + ChunkThreadTuning.workerCount() + " 个 worker / "
+                + ChunkThreadTuning.builderCount() + " 个构建器"
+                + "（核心数 " + ChunkThreadTuning.cores()
+                + "，堆 " + (maxMemory / (1024 * 1024)) + "MB"
+                + "，内存预算 " + ChunkThreadTuning.memoryBudget() + "）";
     }
 }

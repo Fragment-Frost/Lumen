@@ -234,8 +234,29 @@ val dispatcherSelfTest by tasks.registering(JavaExec::class) {
     dependsOn(tasks.named("testClasses"))
 }
 
+/**
+ * 区块构建线程数自适应公式的自测。
+ *
+ * <p>重点验证 {@code builders >= workers} 这个唯一会导致静默死锁的不变量：
+ * {@code allocateRenderBuilder()} 是无条件的 {@code take()}，池子小于 worker 数
+ * 就会有 worker 永久卡死，且不崩溃、不报错。
+ */
+val chunkTuningSelfTest by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Validates the adaptive chunk-builder thread formula."
+
+    classpath = files(
+        layout.buildDirectory.dir("classes/java/main"),
+        layout.buildDirectory.dir("classes/java/test"),
+        mainCompileClasspath
+    )
+
+    mainClass.set("top.fpvp.lumen.verify.ChunkTuningSelfTest")
+    dependsOn(tasks.named("testClasses"))
+}
+
 tasks.named("check") {
-    dependsOn(verifyMixinTargets, dispatcherSelfTest)
+    dependsOn(verifyMixinTargets, dispatcherSelfTest, chunkTuningSelfTest)
 }
 
 // 运行配置：1.8.9 的 launchwrapper 依赖 URLClassLoader（Java 9 起被移除），
